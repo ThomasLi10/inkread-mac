@@ -35,6 +35,10 @@ struct PDFReaderView: NSViewRepresentable {
     var onPageChanged: (Int) -> Void
     var highlights: [ReaderHighlight] = []
     var nightReading: Bool = false
+    var command: ReaderCommand? = nil
+    var onMetrics: (ReaderMetrics) -> Void = { _ in }
+    var onSearchResults: ([ReaderSearchHit]) -> Void = { _ in }
+    var onSearchStatus: (Bool) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -45,6 +49,8 @@ struct PDFReaderView: NSViewRepresentable {
         view.displayDirection = .vertical
         view.displaysPageBreaks = true
         view.backgroundColor = .windowBackgroundColor
+        view.minScaleFactor = 0.1
+        view.maxScaleFactor = 8
         context.coordinator.connect(view)
         updateNSView(view, context: context)
         return view
@@ -60,6 +66,7 @@ struct PDFReaderView: NSViewRepresentable {
             coordinator.lastSelectionSignature = nil
             coordinator.lastJump = nil
             coordinator.lastHighlights = []
+            coordinator.resetNavigationForDocument()
             view.removeManagedHighlights()
             let document = PDFDocument(url: identity)
             coordinator.documentDelegate.nightState.isEnabled = nightReading
@@ -82,11 +89,17 @@ struct PDFReaderView: NSViewRepresentable {
             coordinator.lastJump = jump
             coordinator.performJump(jump)
         }
+        if let command, command.token != coordinator.lastCommandToken {
+            coordinator.lastCommandToken = command.token
+            coordinator.perform(command)
+        }
+        coordinator.scheduleMetrics()
     }
 
     static func dismantleNSView(_ nsView: SelectionPDFView, coordinator: Coordinator) {
         coordinator.disconnect()
         nsView.onRegionCaptured = nil
+        nsView.onViewportChanged = nil
     }
 
     @MainActor
@@ -100,11 +113,26 @@ struct PDFReaderView: NSViewRepresentable {
         var selectionTask: Task<Void, Never>?
         var suppressesSelection = false
         let documentDelegate = ReaderPDFDocumentDelegate()
+        var lastCommandToken: UUID?
+        private var programmaticSelection: PDFSelection?
+        private var metricsTask: Task<Void, Never>?
+        private var lastMetrics: ReaderMetrics?
+        private var searchTask: Task<Void, Never>?
+        private var searchGeneration = UUID()
+        private var searchMatches: [ReaderSearchMatch] = []
+        private var activeMatchIndex = -1
+        private var searchHighlightTask: Task<Void, Never>?
+        private var visibleHighlightSignature = ""
+        private enum ZoomMode { case manual, width, page }
+        private var zoomMode = ZoomMode.manual
+        private var lastViewportSize = NSSize.zero
+        private var refitTask: Task<Void, Never>?
 
         init(_ parent: PDFReaderView) { self.parent = parent }
 
         func connect(_ view: SelectionPDFView) {
             reader = view
+            view.onViewportChanged = { [weak self] in self?.viewportChanged() }
             let center = NotificationCenter.default
             center.addObserver(self, selector: #selector(selectionChanged(_:)),
                                name: .PDFViewSelectionChanged, object: view)
@@ -113,11 +141,18 @@ struct PDFReaderView: NSViewRepresentable {
             center.addObserver(self, selector: #selector(displayChanged(_:)),
                                name: .PDFViewScaleChanged, object: view)
             center.addObserver(self, selector: #selector(displayChanged(_:)),
+                               name: .PDFViewChangedHistory, object: view)
+            center.addObserver(self, selector: #selector(displayChanged(_:)),
                                name: NSView.boundsDidChangeNotification, object: nil)
         }
 
         func disconnect() {
             selectionTask?.cancel()
+            searchTask?.cancel()
+            metricsTask?.cancel()
+            searchHighlightTask?.cancel()
+            refitTask?.cancel()
+            reader?.onViewportChanged = nil
             NotificationCenter.default.removeObserver(self)
             reader = nil
         }
@@ -125,6 +160,7 @@ struct PDFReaderView: NSViewRepresentable {
         @objc private func selectionChanged(_ notification: Notification) {
             guard !suppressesSelection, let reader, !reader.capturesRegion else { return }
             selectionTask?.cancel()
+            if let programmaticSelection, reader.currentSelection === programmaticSelection { return }
             if reader.currentSelection?.string?.isEmpty != false {
                 lastSelectionSignature = nil
                 return
@@ -137,6 +173,7 @@ struct PDFReaderView: NSViewRepresentable {
                 guard let self, !self.suppressesSelection,
                       let reader = self.reader, !reader.capturesRegion,
                       let selected = reader.currentSelection,
+                      selected !== self.programmaticSelection,
                       let page = selected.pages.first,
                       let document = reader.document else { return }
 
@@ -169,6 +206,8 @@ struct PDFReaderView: NSViewRepresentable {
 
         @objc private func pageChanged(_ notification: Notification) {
             reader?.refreshOverlay()
+            scheduleMetrics()
+            scheduleSearchHighlights()
             guard let reader, let document = reader.document, let page = reader.currentPage else { return }
             let index = document.index(for: page)
             guard index != NSNotFound else { return }
@@ -187,6 +226,248 @@ struct PDFReaderView: NSViewRepresentable {
             if let changed = notification.object as? NSView,
                changed !== reader, !changed.isDescendant(of: reader) { return }
             reader.refreshOverlay()
+            scheduleMetrics()
+            scheduleSearchHighlights()
+            viewportChanged()
+        }
+
+        func resetNavigationForDocument() {
+            searchTask?.cancel()
+            searchTask = nil
+            searchGeneration = UUID()
+            searchMatches = []
+            activeMatchIndex = -1
+            visibleHighlightSignature = ""
+            programmaticSelection = nil
+            lastCommandToken = nil
+            lastMetrics = nil
+            zoomMode = .manual
+            lastViewportSize = .zero
+            refitTask?.cancel()
+            publishSearchResults([])
+        }
+
+        func scheduleMetrics() {
+            metricsTask?.cancel()
+            metricsTask = Task { @MainActor [weak self] in
+                await Task.yield()
+                guard !Task.isCancelled, let self, let reader = self.reader,
+                      let document = reader.document, let page = reader.currentPage else { return }
+                let index = document.index(for: page)
+                guard index != NSNotFound else { return }
+                let metrics = ReaderMetrics(scaleFactor: Double(reader.scaleFactor), currentPageIndex: index,
+                    pageLabel: page.label ?? String(index + 1), canGoBack: reader.canGoBack, canGoForward: reader.canGoForward)
+                guard metrics != self.lastMetrics else { return }
+                self.lastMetrics = metrics
+                self.parent.onMetrics(metrics)
+            }
+        }
+
+        func perform(_ command: ReaderCommand) {
+            guard let reader else { return }
+            switch command.action {
+            case .zoomIn:
+                zoomMode = .manual
+                applyScale(reader.scaleFactor * 1.2)
+            case .zoomOut:
+                zoomMode = .manual
+                applyScale(reader.scaleFactor / 1.2)
+            case .actualSize:
+                zoomMode = .manual
+                applyScale(1)
+            case .fitWidth:
+                zoomMode = .width
+                fitViewport()
+            case .fitPage:
+                zoomMode = .page
+                fitViewport()
+            case .search(let query): startSearch(query)
+            case .nextMatch: moveMatch(by: 1)
+            case .previousMatch: moveMatch(by: -1)
+            case .clearSearch: clearSearch()
+            case .clearSelection:
+                internally { reader.clearSelection() }
+                lastSelectionSignature = nil
+            case .back:
+                if reader.canGoBack { internally { reader.goBack(nil) } }
+            case .forward:
+                if reader.canGoForward { internally { reader.goForward(nil) } }
+            }
+            scheduleMetrics()
+        }
+
+        private func internally(_ action: () -> Void) {
+            let previous = suppressesSelection
+            suppressesSelection = true
+            selectionTask?.cancel()
+            action()
+            // PDFKit retains this actual selection instance. Late notifications
+            // for a search/jump/zoom remain suppressed after this call returns.
+            programmaticSelection = reader?.currentSelection
+            suppressesSelection = previous
+        }
+
+        private func viewportSize() -> NSSize {
+            guard let reader else { return .zero }
+            // PDFKit scales the clip view's bounds into document coordinates.
+            // Its frame stays in viewport points; using bounds creates a zoom
+            // feedback loop when a fit command responds to a layout change.
+            return reader.documentView?.enclosingScrollView?.contentView.frame.size ?? reader.bounds.size
+        }
+
+        func viewportChanged() {
+            scheduleMetrics()
+            scheduleSearchHighlights()
+            guard zoomMode != .manual, viewportSize() != lastViewportSize else { return }
+            refitTask?.cancel()
+            refitTask = Task { @MainActor [weak self] in
+                await Task.yield()
+                guard !Task.isCancelled else { return }
+                self?.fitViewport()
+            }
+        }
+
+        private func applyScale(_ value: CGFloat) {
+            guard let reader, value.isFinite, value > 0 else { return }
+            let scale = min(max(value, reader.minScaleFactor), reader.maxScaleFactor)
+            let destination = reader.currentDestination
+            let selection = reader.currentSelection
+            internally {
+                reader.autoScales = false
+                if abs(reader.scaleFactor - scale) > 0.0001 { reader.scaleFactor = scale }
+                if let destination { reader.go(to: destination) }
+                if let selection, reader.currentSelection !== selection {
+                    reader.setCurrentSelection(selection, animate: false)
+                }
+            }
+            scheduleMetrics()
+            scheduleSearchHighlights()
+        }
+
+        private func fitViewport() {
+            guard zoomMode != .manual, let reader, let page = reader.currentPage else { return }
+            let viewport = viewportSize()
+            guard viewport.width > 40, viewport.height > 40 else { return }
+            lastViewportSize = viewport
+            let pageSize = page.bounds(for: reader.displayBox).applying(page.transform(for: reader.displayBox)).size
+            guard pageSize.width > 0, pageSize.height > 0 else { return }
+            let margins = reader.pageBreakMargins
+            let widthScale = max(1, viewport.width - margins.left - margins.right - 8) / pageSize.width
+            let heightScale = max(1, viewport.height - margins.top - margins.bottom - 8) / pageSize.height
+            applyScale(zoomMode == .width ? widthScale : min(widthScale, heightScale))
+        }
+
+        private func publishSearchResults(_ hits: [ReaderSearchHit]) {
+            let generation = searchGeneration
+            Task { @MainActor [weak self] in
+                await Task.yield()
+                guard let self, self.reader != nil, self.searchGeneration == generation else { return }
+                guard self.searchMatches.map(\.hit.id) == hits.map(\.id) else { return }
+                self.parent.onSearchResults(hits)
+            }
+        }
+
+        private func publishSearchStatus(_ searching: Bool) {
+            let generation = searchGeneration
+            Task { @MainActor [weak self] in
+                await Task.yield()
+                guard let self, self.reader != nil, self.searchGeneration == generation else { return }
+                self.parent.onSearchStatus(searching)
+            }
+        }
+
+        private func clearSearch() {
+            searchTask?.cancel()
+            searchTask = nil
+            searchGeneration = UUID()
+            searchMatches = []
+            activeMatchIndex = -1
+            visibleHighlightSignature = ""
+            if let reader {
+                internally {
+                    reader.highlightedSelections = nil
+                    if reader.currentSelection === programmaticSelection { reader.clearSelection() }
+                }
+            }
+            programmaticSelection = nil
+            publishSearchResults([])
+            publishSearchStatus(false)
+        }
+
+        private func startSearch(_ value: String) {
+            clearSearch()
+            let query = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !query.isEmpty, let url = loadedURL else { return }
+            let generation = searchGeneration
+            publishSearchStatus(true)
+            searchTask = Task.detached(priority: .userInitiated) { [weak self] in
+                await ReaderDocumentSearch.search(url: url, query: query) { [weak self] matches in
+                    await self?.receiveSearch(matches, generation: generation)
+                }
+                await self?.finishSearch(generation: generation)
+            }
+        }
+
+        private func finishSearch(generation: UUID) {
+            guard searchGeneration == generation else { return }
+            publishSearchStatus(false)
+        }
+
+        private func receiveSearch(_ matches: [ReaderSearchMatch], generation: UUID) {
+            guard searchGeneration == generation, reader != nil else { return }
+            searchMatches = matches
+            publishSearchResults(matches.map(\.hit))
+            if activeMatchIndex < 0, !matches.isEmpty { selectMatch(at: 0) }
+            scheduleSearchHighlights()
+        }
+
+        private func moveMatch(by offset: Int) {
+            guard !searchMatches.isEmpty else { return }
+            let count = searchMatches.count
+            let next = activeMatchIndex < 0 ? (offset < 0 ? count - 1 : 0) : (activeMatchIndex + offset + count) % count
+            selectMatch(at: next)
+        }
+
+        private func selectMatch(at index: Int) {
+            guard searchMatches.indices.contains(index), let reader,
+                  let page = reader.document?.page(at: searchMatches[index].hit.pageIndex),
+                  let selection = page.selection(for: searchMatches[index].range) else { return }
+            activeMatchIndex = index
+            selection.color = NSColor.systemOrange.withAlphaComponent(0.65)
+            internally {
+                reader.setCurrentSelection(selection, animate: true)
+                reader.go(to: selection)
+            }
+            visibleHighlightSignature = ""
+            scheduleSearchHighlights()
+            scheduleMetrics()
+        }
+
+        private func scheduleSearchHighlights() {
+            guard !searchMatches.isEmpty else { return }
+            searchHighlightTask?.cancel()
+            searchHighlightTask = Task { @MainActor [weak self] in
+                await Task.yield()
+                guard !Task.isCancelled else { return }
+                self?.updateSearchHighlights()
+            }
+        }
+
+        private func updateSearchHighlights() {
+            guard let reader, let document = reader.document else { return }
+            let visibleIndices = Set(reader.visiblePages.map { document.index(for: $0) })
+            let signature = "\(searchGeneration)|\(searchMatches.count)|\(activeMatchIndex)|\(visibleIndices.sorted())"
+            guard signature != visibleHighlightSignature else { return }
+            visibleHighlightSignature = signature
+            // Reconstitute PDFSelections only for visible pages. A large book's
+            // other page text never needs decoding on the UI thread for search.
+            reader.highlightedSelections = searchMatches.compactMap { match in
+                guard visibleIndices.contains(match.hit.pageIndex),
+                      let page = document.page(at: match.hit.pageIndex),
+                      let selection = page.selection(for: match.range) else { return nil }
+                selection.color = NSColor.systemYellow.withAlphaComponent(0.45)
+                return selection
+            }
         }
 
         func performJump(_ jump: ReaderJump) {
@@ -194,6 +475,7 @@ struct PDFReaderView: NSViewRepresentable {
             suppressesSelection = true
             selectionTask?.cancel()
             reader.clearSelection()
+            programmaticSelection = nil
             if let first = jump.rects.first {
                 let region = jump.rects.dropFirst().reduce(first.cgRect) { $0.union($1.cgRect) }
                 reader.go(to: region.insetBy(dx: -16, dy: -24), on: page)
@@ -203,6 +485,8 @@ struct PDFReaderView: NSViewRepresentable {
             reader.flash(page: page, rectangles: jump.rects.map(\.cgRect))
             lastSelectionSignature = nil
             suppressesSelection = false
+            scheduleMetrics()
+            scheduleSearchHighlights()
         }
     }
 }
@@ -260,6 +544,7 @@ final class SelectionPDFView: PDFView {
         }
     }
     var onRegionCaptured: ((ReaderSelection) -> Void)?
+    var onViewportChanged: (() -> Void)?
     private var startPoint: NSPoint?
     private var dragPage: PDFPage?
     fileprivate var dragRect: NSRect?
@@ -280,6 +565,7 @@ final class SelectionPDFView: PDFView {
         if subviews.last !== overlay { addSubview(overlay, positioned: .above, relativeTo: nil) }
         overlay.frame = bounds
         overlay.needsDisplay = true
+        onViewportChanged?()
     }
 
     override func viewDidChangeEffectiveAppearance() {

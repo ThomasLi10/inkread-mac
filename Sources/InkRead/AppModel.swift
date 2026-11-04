@@ -10,11 +10,21 @@ import CodexBridge
 final class AppModel: ObservableObject {
     @Published var store: LibraryStore?
     @Published var selectedBookID: UUID?
-    @Published var selectedDiscussionID: UUID?
+    @Published var selectedDiscussionID: UUID? {
+        willSet { if !restoringContext { rememberDraft() } }
+        didSet {
+            if !restoringContext {
+                rememberDiscussion()
+                prompt = draftKey.flatMap { drafts[$0] } ?? ""
+            }
+        }
+    }
     @Published var selection: ReaderSelection?
     @Published var readerJump: ReaderJump?
     @Published var captureRegion = false
-    @Published var prompt = ""
+    @Published var prompt = "" {
+        didSet { rememberDraft() }
+    }
     @Published var librarySearch = ""
     @Published var noteSearch = ""
     @Published var rightTab = 0
@@ -25,11 +35,26 @@ final class AppModel: ObservableObject {
     @Published var activity = ""
     @Published var streamingText = ""
     @Published var unsavedReply: String?
+    @Published var unsavedReplyOrigin = ""
     @Published var showNoteEditor = false
     @Published var noteTitle = ""
     @Published var noteBody = ""
     @Published var editingNote: Note?
     @Published var pageNumber = "1"
+    @Published var showNavigation = true
+    @Published var showInspector = true
+    @Published var showCommandPalette = false
+    @Published var navigationTab = 1
+    @Published var showPDFSearch = false
+    @Published var pdfSearchQuery = "" {
+        didSet { if oldValue != pdfSearchQuery { schedulePDFSearch() } }
+    }
+    @Published var pdfSearchHits: [ReaderSearchHit] = []
+    @Published var pdfSearching = false
+    @Published var outline: [ReaderOutlineItem] = []
+    @Published var readerCommand: ReaderCommand?
+    @Published var readerMetrics: ReaderMetrics?
+    @Published var focusMode = false
     @Published var codexPath = UserDefaults.standard.string(forKey: "codexExecutable") ?? ""
     @Published var appearanceMode = AppearanceMode(rawValue: UserDefaults.standard.string(forKey: "appearanceMode") ?? "system") ?? .system {
         didSet {
@@ -49,6 +74,15 @@ final class AppModel: ObservableObject {
     private var lastCheckpoint = Date.distantPast
     private var activeDiscussionID: UUID?
     private var pendingPage: (UUID, Int)?
+    private var activeDocumentID: UUID?
+    private var restoringContext = false
+    private var drafts = UserDefaults.standard.dictionary(forKey: "readingDrafts") as? [String: String] ?? [:]
+    private var rememberedDiscussions = UserDefaults.standard.dictionary(forKey: "readingDiscussions") as? [String: String] ?? [:]
+    private var indexingTask: Task<Void, Never>?
+    private var searchTask: Task<Void, Never>?
+    private var layoutBeforeFocus = (true, true)
+    private var noteDocumentID: UUID?
+    private var noteDiscussionID: UUID?
 
     init() {
         do {
@@ -88,6 +122,7 @@ final class AppModel: ObservableObject {
     }
 
     func choosePDFs() {
+        guard !isBusy else { return }
         let panel = NSOpenPanel()
         panel.title = "导入 PDF 到墨读"
         panel.allowedContentTypes = [.pdf]
@@ -156,27 +191,118 @@ final class AppModel: ObservableObject {
     }
 
     func restoreSelection() {
+        guard activeDocumentID != selectedBookID || activeDocumentID == nil else { return }
+        flushReadingProgress()
+        rememberDraft()
+        rememberDiscussion()
+        restoringContext = true
+        defer { restoringContext = false; rememberDiscussion() }
+        activeDocumentID = selectedBookID
         selection = nil
         captureRegion = false
-        selectedDiscussionID = nil
-        prompt = ""
-        guard let book = selectedBook else { return }
+        readerMetrics = nil
+        pdfSearchQuery = ""
+        pdfSearchHits = []
+        pdfSearching = false
+        outline = []
+        noteSearch = ""
+        guard let book = selectedBook else { prompt = ""; selectedDiscussionID = nil; return }
+        let savedID = rememberedDiscussions[book.id.uuidString].flatMap(UUID.init(uuidString:))
+        selectedDiscussionID = discussions.first(where: { $0.id == savedID })?.id
+        if selectedDiscussionID == nil { selectedDiscussionID = discussions.first?.id }
+        prompt = draftKey.flatMap { drafts[$0] } ?? drafts[book.id.uuidString] ?? ""
+        drafts.removeValue(forKey: book.id.uuidString)
         UserDefaults.standard.set(book.id.uuidString, forKey: "lastBookID")
         readerJump = ReaderJump(pageIndex: book.currentPage)
         pageNumber = String(book.currentPage + 1)
+        navigationTab = 1
+        indexingTask?.cancel()
+        guard let url = store?.pdfURL(for: book) else { return }
+        indexingTask = Task { [weak self] in
+            let items = await Task.detached(priority: .utility) { ReaderDocumentIndex.load(url: url) }.value
+            guard !Task.isCancelled, let self, self.selectedBookID == book.id else { return }
+            self.outline = items
+        }
     }
+
+    private var draftKey: String? {
+        guard let id = activeDocumentID else { return nil }
+        let thread = selectedDiscussionID.flatMap { value in
+            store?.discussions.contains(where: { $0.id == value && $0.documentID == id }) == true ? value.uuidString : nil
+        } ?? "new"
+        return id.uuidString + "/" + thread
+    }
+    private func rememberDraft() {
+        guard !restoringContext, let key = draftKey else { return }
+        if prompt.isEmpty { drafts.removeValue(forKey: key) }
+        else { drafts[key] = prompt }
+        UserDefaults.standard.set(drafts, forKey: "readingDrafts")
+    }
+    private func rememberDiscussion() {
+        guard let id = activeDocumentID, let discussionID = selectedDiscussionID,
+              store?.discussions.contains(where: { $0.id == discussionID && $0.documentID == id }) == true else { return }
+        rememberedDiscussions[id.uuidString] = discussionID.uuidString
+        UserDefaults.standard.set(rememberedDiscussions, forKey: "readingDiscussions")
+    }
+    private func schedulePDFSearch() {
+        searchTask?.cancel()
+        let query = pdfSearchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        if query.isEmpty { pdfSearchHits = []; performReader(.clearSearch); return }
+        searchTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 280_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.performReader(.search(query: query))
+        }
+    }
+    func performReader(_ action: ReaderCommand.Action) { readerCommand = ReaderCommand(action: action) }
+    func clearReaderSelection() { selection = nil; performReader(.clearSelection) }
+    func openPDFSearch() {
+        guard selectedBook != nil else { return }
+        showNavigation = true; navigationTab = 2; showPDFSearch = true
+    }
+    func openOutline() { showNavigation = true; navigationTab = 1 }
+    func navigate(to index: Int) {
+        guard let book = selectedBook else { return }
+        readerJump = ReaderJump(pageIndex: min(max(0, index), book.pageCount - 1))
+    }
+    func toggleFocusMode() {
+        if focusMode {
+            showNavigation = layoutBeforeFocus.0; showInspector = layoutBeforeFocus.1
+        } else {
+            layoutBeforeFocus = (showNavigation, showInspector)
+            showNavigation = false; showInspector = false
+        }
+        focusMode.toggle()
+    }
+    var currentChapter: ReaderOutlineItem? {
+        let page = readerMetrics?.currentPageIndex ?? selectedBook?.currentPage ?? 0
+        return outline.last(where: { $0.pageIndex <= page })
+    }
+    var zoomLabel: String { "\(Int(((readerMetrics?.scaleFactor ?? 1) * 100).rounded()))%" }
 
     func recordPage(_ index: Int) {
         pageNumber = String(index + 1)
-        guard var book = selectedBook, index != book.currentPage else { return }
-        book.currentPage = index
+        guard let book = selectedBook else { return }
+        if index == book.currentPage {
+            if pendingPage?.0 == book.id { pendingPage = nil; progressTask?.cancel() }
+            return
+        }
+        if pendingPage?.0 == book.id && pendingPage?.1 == index { return }
         pendingPage = (book.id, index)
         progressTask?.cancel()
         progressTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 400_000_000)
             guard !Task.isCancelled, let self else { return }
-            do { try self.store?.updateBook(book) } catch { self.report(error, prefix: "阅读位置保存失败") }
+            self.flushReadingProgress()
         }
+    }
+
+    private func flushReadingProgress() {
+        progressTask?.cancel()
+        guard let (id, index) = pendingPage, var book = store?.books.first(where: { $0.id == id }) else { return }
+        book.currentPage = index
+        do { try store?.updateBook(book); pendingPage = nil }
+        catch { report(error, prefix: "阅读位置保存失败") }
     }
 
     func turnPage(_ delta: Int) {
@@ -209,9 +335,11 @@ final class AppModel: ObservableObject {
                 ?? (anchor == nil ? "关于这本书" : "第 \((anchor?.pageIndex ?? 0) + 1) 页图表")
             let discussion = Discussion(documentID: book.id, title: title, anchor: anchor)
             try store.upsert(discussion)
+            let pendingQuestion = useSelection ? prompt : ""
             selectedDiscussionID = discussion.id
+            prompt = pendingQuestion
             rightTab = 0
-            prompt = ""
+            showInspector = true
         } catch { report(error, prefix: "创建讨论失败") }
     }
 
@@ -263,14 +391,14 @@ final class AppModel: ObservableObject {
                 }
                 if self.updateMessage(discussionID: discussionID, messageID: assistant.id, body: answer, status: .completed) {
                     self.notice = "讨论已自动保存"
-                } else { self.unsavedReply = answer }
+                } else { self.unsavedReply = answer; self.unsavedReplyOrigin = "《\(book.title)》 · \(discussion.title)" }
             } catch {
                 let partial = self.streamingText
                 let wasCancelled = Task.isCancelled || error is CancellationError
                 let saved = self.updateMessage(discussionID: discussionID, messageID: assistant.id,
                     body: partial.isEmpty ? (wasCancelled ? "已停止生成。" : "此次请求未完成：\(error.localizedDescription)") : partial,
                     status: wasCancelled ? .interrupted : .failed)
-                if !saved { self.unsavedReply = partial }
+                if !saved { self.unsavedReply = partial; self.unsavedReplyOrigin = "《\(book.title)》 · \(discussion.title)" }
                 if !wasCancelled { self.report(error, prefix: "Codex 请求失败") }
             }
             self.streamingText = ""
@@ -322,24 +450,27 @@ final class AppModel: ObservableObject {
         readerJump = ReaderJump(pageIndex: anchor.pageIndex, rects: anchor.rects)
     }
     func openNoteEditor(existing: Note? = nil, answer: ChatMessage? = nil) {
-        guard selectedBook != nil else { return }
+        guard let book = selectedBook else { return }
         editingNote = existing
+        noteDocumentID = existing?.documentID ?? book.id
         let usesCurrentSelection = existing == nil && answer == nil && selection != nil
         noteTitle = existing?.title ?? (usesCurrentSelection ? "第 \((selection?.pageIndex ?? 0) + 1) 页阅读笔记" : currentDiscussion?.title ?? "阅读笔记")
         noteBody = existing?.body ?? answer?.body ?? (usesCurrentSelection ? selection?.text : currentDiscussion?.messages.last(where: { $0.role == .assistant && $0.status == .completed })?.body) ?? ""
         do {
-            if usesCurrentSelection { noteAnchor = try makeAnchor() }
+            if answer != nil { noteAnchor = currentDiscussion?.anchor }
+            else if usesCurrentSelection { noteAnchor = try makeAnchor() }
             else if let anchor = existing?.anchors.first { noteAnchor = anchor }
             else if let anchor = currentDiscussion?.anchor { noteAnchor = anchor }
             else { noteAnchor = try makeAnchor() }
         }
         catch { report(error, prefix: "保存引用失败"); return }
+        noteDiscussionID = existing?.discussionID ?? (answer != nil || noteAnchor?.id == currentDiscussion?.anchor?.id ? currentDiscussion?.id : nil)
         showNoteEditor = true
     }
     func saveNote() {
-        guard let book = selectedBook, let store, !noteBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        let discussionID = noteAnchor?.id == currentDiscussion?.anchor?.id ? currentDiscussion?.id : nil
-        var note = editingNote ?? Note(documentID: book.id, discussionID: discussionID, title: "", body: "", anchors: noteAnchor.map { [$0] } ?? [])
+        guard let store, let ownerID = noteDocumentID, store.books.contains(where: { $0.id == ownerID }),
+              !noteBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        var note = editingNote ?? Note(documentID: ownerID, discussionID: noteDiscussionID, title: "", body: "", anchors: noteAnchor.map { [$0] } ?? [])
         note.title = noteTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "阅读笔记" : noteTitle
         note.body = noteBody
         note.updatedAt = Date()
@@ -393,11 +524,9 @@ final class AppModel: ObservableObject {
         codex.executableOverride = path.isEmpty ? nil : path
     }
     func flushBeforeExit() {
-        progressTask?.cancel()
-        if let (id, index) = pendingPage, var book = store?.books.first(where: { $0.id == id }) {
-            book.currentPage = index
-            try? store?.updateBook(book)
-        }
+        rememberDraft()
+        rememberDiscussion()
+        flushReadingProgress()
         if let discussionID = activeDiscussionID, let messageID = activeAssistantID {
             updateMessage(discussionID: discussionID, messageID: messageID, body: streamingText.isEmpty ? "已停止生成。" : streamingText, status: .interrupted)
         }
