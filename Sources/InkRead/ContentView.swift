@@ -5,6 +5,7 @@ import InkReadCore
 
 struct ContentView: View {
     @ObservedObject var model: AppModel
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         HSplitView {
@@ -21,6 +22,19 @@ struct ContentView: View {
                 }
             }
             ToolbarItemGroup {
+                Menu {
+                    Picker("应用外观", selection: $model.appearanceMode) {
+                        ForEach(AppearanceMode.allCases) { mode in Label(mode.title, systemImage: mode.symbol).tag(mode) }
+                    }
+                    Divider()
+                    Toggle("深色时反转 PDF 颜色", isOn: $model.invertPDFInDarkMode)
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: model.appearanceMode.symbol)
+                        Text("外观")
+                    }
+                }.accessibilityLabel("外观").accessibilityValue(model.appearanceMode.title)
+                    .help("浅色、深色或跟随系统；设置 PDF 页面颜色")
                 Button(action: model.choosePDFs) { Label("导入 PDF", systemImage: "plus") }.disabled(model.isBusy)
                 Button(action: model.exportNotes) { Label("导出笔记", systemImage: "square.and.arrow.up") }.disabled(model.selectedBook == nil)
             }
@@ -115,7 +129,8 @@ struct ContentView: View {
                 ZStack(alignment: .top) {
                     PDFReaderView(url: store.pdfURL(for: book), captureRegion: model.captureRegion, jump: model.readerJump,
                                   onSelection: model.receiveSelection, onPageChanged: model.recordPage,
-                                  highlights: sourceHighlights).id(book.id)
+                                  highlights: sourceHighlights,
+                                  nightReading: colorScheme == .dark && model.invertPDFInDarkMode).id(book.id)
                     if model.captureRegion {
                         Label("在一页内拖动，框住想讨论的图表或公式", systemImage: "cursorarrow.square")
                             .font(.callout).padding(.horizontal, 16).padding(.vertical, 9)
@@ -137,7 +152,7 @@ struct ContentView: View {
                             Text("选段与页内位置将随讨论保存").font(.caption2).foregroundStyle(.secondary)
                             Spacer()
                             Button { model.startDiscussion() } label: { Label("讨论此处", systemImage: "bubble.left.and.bubble.right") }
-                                .buttonStyle(.borderedProminent).disabled(model.isBusy)
+                                .buttonStyle(.borderedProminent).foregroundStyle(Color.onAccent).disabled(model.isBusy)
                         }
                     }.padding(14).background(Color.accent.opacity(0.045))
                 } else {
@@ -155,7 +170,7 @@ struct ContentView: View {
                 Text("导入书籍或论文，围绕一段话、一张图展开讨论。\n原文、思考与结论，都留在同一个地方。")
                     .multilineTextAlignment(.center).foregroundStyle(.secondary).lineSpacing(6)
                 Button(action: model.choosePDFs) { Label("导入 PDF 开始阅读", systemImage: "plus") }
-                    .buttonStyle(.borderedProminent).controlSize(.large).disabled(model.isBusy)
+                    .buttonStyle(.borderedProminent).foregroundStyle(Color.onAccent).controlSize(.large).disabled(model.isBusy)
             }.frame(maxWidth: .infinity, maxHeight: .infinity).background(Color.paper)
         }
     }
@@ -293,7 +308,7 @@ struct ContentView: View {
                     Button("停止", action: model.cancelResponse).buttonStyle(.bordered)
                 } else {
                     Button(action: model.sendMessage) { Label("发送", systemImage: "arrow.up") }
-                        .buttonStyle(.borderedProminent).keyboardShortcut(.return, modifiers: .command)
+                        .buttonStyle(.borderedProminent).foregroundStyle(Color.onAccent).keyboardShortcut(.return, modifiers: .command)
                         .disabled(model.selectedBook == nil || model.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isImporting)
                 }
             }
@@ -372,7 +387,7 @@ struct NoteEditor: View {
                 Text("原文引用随笔记一起保存").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("取消") { model.showNoteEditor = false }.keyboardShortcut(.cancelAction)
-                Button("保存", action: model.saveNote).buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
+                Button("保存", action: model.saveNote).buttonStyle(.borderedProminent).foregroundStyle(Color.onAccent).keyboardShortcut(.defaultAction)
                     .disabled(model.noteBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }.padding(24).frame(width: 650, height: 500)
@@ -383,6 +398,14 @@ struct SettingsView: View {
     @ObservedObject var model: AppModel
     var body: some View {
         Form {
+            Section("阅读外观") {
+                Picker("应用外观", selection: $model.appearanceMode) {
+                    ForEach(AppearanceMode.allCases) { mode in Text(mode.title).tag(mode) }
+                }.pickerStyle(.segmented)
+                Toggle("深色时反转 PDF 颜色", isOn: $model.invertPDFInDarkMode)
+                Text("将白底黑字显示为深底浅字。彩色图片也会反转，可随时关闭以查看原色。原文件与发送给 Codex 的截图保持原色。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Section("本地 Codex") {
                 TextField("可执行文件路径（留空自动查找）", text: $model.codexPath)
                 HStack {

@@ -31,6 +31,15 @@ final class AppModel: ObservableObject {
     @Published var editingNote: Note?
     @Published var pageNumber = "1"
     @Published var codexPath = UserDefaults.standard.string(forKey: "codexExecutable") ?? ""
+    @Published var appearanceMode = AppearanceMode(rawValue: UserDefaults.standard.string(forKey: "appearanceMode") ?? "system") ?? .system {
+        didSet {
+            UserDefaults.standard.set(appearanceMode.rawValue, forKey: "appearanceMode")
+            applyAppearance()
+        }
+    }
+    @Published var invertPDFInDarkMode = UserDefaults.standard.object(forKey: "invertPDFInDarkMode") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(invertPDFInDarkMode, forKey: "invertPDFInDarkMode") }
+    }
     let codex = CodexClient()
     private var subscriptions = Set<AnyCancellable>()
     private var responseTask: Task<Void, Never>?
@@ -73,6 +82,10 @@ final class AppModel: ObservableObject {
         (store?.notes ?? []).filter { $0.documentID == selectedBookID && (noteSearch.isEmpty || $0.title.localizedCaseInsensitiveContains(noteSearch) || $0.body.localizedCaseInsensitiveContains(noteSearch)) }.sorted { $0.updatedAt > $1.updatedAt }
     }
     var isBusy: Bool { isGenerating || isImporting }
+
+    func applyAppearance() {
+        NSApp?.appearance = appearanceMode.appKitAppearance
+    }
 
     func choosePDFs() {
         let panel = NSOpenPanel()

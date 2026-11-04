@@ -11,6 +11,7 @@ struct InkReadApp: App {
             ContentView(model: model)
                 .frame(minWidth: 1120, minHeight: 720)
                 .tint(Color.accent)
+                .onAppear(perform: model.applyAppearance)
                 .onOpenURL { model.importPDFs([$0]) }
         }
         .defaultSize(width: 1440, height: 900)
@@ -28,8 +29,15 @@ struct InkReadApp: App {
                 Button("讨论选中内容") { model.startDiscussion() }.keyboardShortcut("d", modifiers: [.command, .shift])
                 Button("保存为笔记") { model.openNoteEditor() }.keyboardShortcut("s", modifiers: [.command, .shift])
             }
+            CommandMenu("外观") {
+                Picker("应用外观", selection: $model.appearanceMode) {
+                    ForEach(AppearanceMode.allCases) { mode in Text(mode.title).tag(mode) }
+                }
+                Divider()
+                Toggle("深色时反转 PDF 颜色", isOn: $model.invertPDFInDarkMode)
+            }
         }
-        Settings { SettingsView(model: model).frame(width: 540, height: 260).padding(24) }
+        Settings { SettingsView(model: model).frame(width: 580, height: 430).padding(24).tint(Color.accent) }
     }
 }
 
@@ -40,6 +48,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApp.hide(nil)
             return
         }
+        if ProcessInfo.processInfo.environment["INKREAD_BACKGROUND_TEST"] == "1" {
+            NSApp.setActivationPolicy(.accessory)
+            return
+        }
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
     }
@@ -47,6 +59,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 extension Color {
-    static let accent = Color(red: 0.12, green: 0.39, blue: 0.36)
+    static let accent = Color(nsColor: NSColor(name: "InkReadAccent") { appearance in
+        if appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua {
+            return NSColor(srgbRed: 0.42, green: 0.77, blue: 0.69, alpha: 1)
+        }
+        return NSColor(srgbRed: 0.12, green: 0.39, blue: 0.36, alpha: 1)
+    })
+    static let onAccent = Color(nsColor: NSColor(name: "InkReadOnAccent") { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            ? NSColor(srgbRed: 0.06, green: 0.15, blue: 0.13, alpha: 1) : .white
+    })
     static let paper = Color(nsColor: .textBackgroundColor)
 }

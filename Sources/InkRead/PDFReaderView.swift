@@ -34,6 +34,7 @@ struct PDFReaderView: NSViewRepresentable {
     var onSelection: (ReaderSelection) -> Void
     var onPageChanged: (Int) -> Void
     var highlights: [ReaderHighlight] = []
+    var nightReading: Bool = false
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -60,10 +61,15 @@ struct PDFReaderView: NSViewRepresentable {
             coordinator.lastJump = nil
             coordinator.lastHighlights = []
             view.removeManagedHighlights()
-            view.document = PDFDocument(url: identity)
+            let document = PDFDocument(url: identity)
+            coordinator.documentDelegate.nightState.isEnabled = nightReading
+            // Set the public page factory before PDFView requests its first page.
+            document?.delegate = coordinator.documentDelegate
+            view.document = document
             coordinator.loadedURL = identity
             coordinator.suppressesSelection = false
         }
+        view.setNightReading(nightReading)
         view.capturesRegion = captureRegion
         view.onRegionCaptured = { [weak coordinator] selection in
             coordinator?.parent.onSelection(selection)
@@ -93,6 +99,7 @@ struct PDFReaderView: NSViewRepresentable {
         var lastSelectionSignature: String?
         var selectionTask: Task<Void, Never>?
         var suppressesSelection = false
+        let documentDelegate = ReaderPDFDocumentDelegate()
 
         init(_ parent: PDFReaderView) { self.parent = parent }
 
@@ -169,7 +176,8 @@ struct PDFReaderView: NSViewRepresentable {
             // that update before mutating the app's observable reading position.
             Task { @MainActor [weak self] in
                 await Task.yield()
-                guard let self, self.reader?.document === document else { return }
+                guard let self, let reader = self.reader, reader.document === document,
+                      let currentPage = reader.currentPage, document.index(for: currentPage) == index else { return }
                 self.parent.onPageChanged(index)
             }
         }
@@ -199,6 +207,48 @@ struct PDFReaderView: NSViewRepresentable {
     }
 }
 
+/// PDFKit may draw page tiles away from the main thread. The drawing path only
+/// reads this small locked state and never reaches SwiftUI or AppKit appearance.
+final class ReaderNightState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var enabled = false
+
+    var isEnabled: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return enabled }
+        set { lock.lock(); enabled = newValue; lock.unlock() }
+    }
+}
+
+final class ReaderPDFDocumentDelegate: NSObject, PDFDocumentDelegate {
+    let nightState = ReaderNightState()
+    func classForPage() -> AnyClass { ReaderPDFPage.self }
+}
+
+/// Transform colors inside PDFKit's original drawing context, after the native
+/// PDF vectors/text have been rendered at that tile's actual resolution.
+/// There is no intermediate whole-document bitmap or Core Animation filter.
+final class ReaderPDFPage: PDFPage {
+    override func draw(with box: PDFDisplayBox, to context: CGContext) {
+        guard (document?.delegate as? ReaderPDFDocumentDelegate)?.nightState.isEnabled == true else {
+            super.draw(with: box, to: context)
+            return
+        }
+        let paper = bounds(for: box).applying(transform(for: box)).standardized
+        context.saveGState()
+        // A PDF can leave its paper transparent. Establish opaque white in the
+        // same rotated/cropped display space before drawing and inverting it.
+        context.setBlendMode(.normal)
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(paper)
+        super.draw(with: box, to: context)
+        context.setBlendMode(.difference)
+        context.setAlpha(0.93)
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(paper)
+        context.restoreGState()
+    }
+}
+
 @MainActor
 final class SelectionPDFView: PDFView {
     var capturesRegion = false {
@@ -217,6 +267,7 @@ final class SelectionPDFView: PDFView {
     fileprivate var flashedRects: [NSRect] = []
     private var flashTask: Task<Void, Never>?
     private var managedHighlights: [(PDFPage, PDFAnnotation)] = []
+    private var nightReadingEnabled = false
     private lazy var overlay: ReaderOverlayView = {
         let view = ReaderOverlayView()
         view.reader = self
@@ -229,6 +280,35 @@ final class SelectionPDFView: PDFView {
         if subviews.last !== overlay { addSubview(overlay, positioned: .above, relativeTo: nil) }
         overlay.frame = bounds
         overlay.needsDisplay = true
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        backgroundColor = .windowBackgroundColor
+        refreshOverlay()
+        needsDisplay = true
+    }
+
+    /// Toggle the original PDFPage renderer's color transform and invalidate its
+    /// native page tiles. Document identity, scale, scroll and selection survive.
+    func setNightReading(_ enabled: Bool) {
+        let state = (document?.delegate as? ReaderPDFDocumentDelegate)?.nightState
+        let stateChanged = state?.isEnabled != enabled
+        state?.isEnabled = enabled
+        guard nightReadingEnabled != enabled || stateChanged else { return }
+        nightReadingEnabled = enabled
+        func invalidate(_ layer: CALayer) {
+            layer.setNeedsDisplay()
+            for child in layer.sublayers ?? [] { invalidate(child) }
+        }
+        func invalidate(_ view: NSView) {
+            view.needsDisplay = true
+            if let layer = view.layer { invalidate(layer) }
+            for child in view.subviews { invalidate(child) }
+        }
+        if let documentView { invalidate(documentView) }
+        needsDisplay = true
+        refreshOverlay()
     }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
