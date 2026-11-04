@@ -342,6 +342,25 @@ final class AppModel: ObservableObject {
         guard alert.runModal() == .alertSecondButtonReturn else { return }
         do { try store?.deleteNote(id: note.id) } catch { report(error, prefix: "删除失败") }
     }
+    func renameBook(_ book: Book) {
+        guard !isBusy else { return }
+        let alert = NSAlert()
+        alert.messageText = "重命名书籍"
+        alert.informativeText = "修改书库中显示的名称，原始 PDF 文件会保留。"
+        let field = NSTextField(string: book.title)
+        field.frame = NSRect(x: 0, y: 0, width: 380, height: 24)
+        alert.accessoryView = field
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "取消")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let title = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return }
+        var changed = book
+        changed.title = title
+        do { try store?.updateBook(changed); notice = "书名已更新" }
+        catch { report(error, prefix: "书名保存失败") }
+    }
     func exportNotes() {
         guard let book = selectedBook, let store else { return }
         let panel = NSSavePanel()

@@ -76,6 +76,12 @@ struct ContentView: View {
                                 Text("\(book.currentPage + 1) / \(book.pageCount) 页").font(.caption).foregroundStyle(.secondary)
                             }
                         }.padding(.vertical, 7).tag(book.id)
+                            .contextMenu {
+                                Button("重命名书籍…") { model.renameBook(book) }
+                                Button("在 Finder 中显示 PDF") {
+                                    if let url = model.store?.pdfURL(for: book) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+                                }
+                            }
                     }
                 }.listStyle(.sidebar).disabled(model.isBusy)
             }
