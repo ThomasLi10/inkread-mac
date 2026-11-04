@@ -1,0 +1,16 @@
+.build/
+.swiftpm/
+build/
+.DS_Store
+*.xcuserstate
+xcuserdata/
+*.app/
+*.zip
+*.dmg
+*.log
+TestResults/
+.env
+.env.*
+auth.json
+config.toml
+Library/
