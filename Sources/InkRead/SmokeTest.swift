@@ -52,7 +52,8 @@ enum SmokeTest {
         let oldModel = UserDefaults.standard.object(forKey: "inkreadCodexModel")
         let oldEffort = UserDefaults.standard.object(forKey: "inkreadCodexEffort")
         let languageChecks = environment["INKREAD_SMOKE_LANGUAGE"] == "1"
-        let deadline = Date().addingTimeInterval(languageChecks ? 300 : 180)
+        let privateChecks = environment["INKREAD_SMOKE_PRIVATE"] == "1"
+        let deadline = Date().addingTimeInterval(languageChecks || privateChecks ? 300 : 180)
         defer {
             for (key, original) in [("inkreadCodexModel", oldModel), ("inkreadCodexEffort", oldEffort)] {
                 if let original { UserDefaults.standard.set(original, forKey: key) }
@@ -129,7 +130,7 @@ enum SmokeTest {
                             "The app did not retain the explicitly selected model and effort.")
                 pass(["modelCount": String(model.availableModels.count), "model": descriptor.model,
                       "displayName": descriptor.displayName, "effort": effort,
-                      "appliesToFollowingFreshAndResumedTurns": "true"], report: &report, at: reportURL)
+                      "appliesToFollowingFreshAndLocalHistoryTurns": "true"], report: &report, at: reportURL)
             }
 
             begin("real-pdf-text-selection", report: &report, at: reportURL)
@@ -161,13 +162,16 @@ enum SmokeTest {
             try await wait(until: { !model.isGenerating }, deadline: deadline, label: "first Codex response")
             let firstAnswer = try completedAnswer(in: model, discussionID: textDiscussionID)
             try require(firstAnswer.body.contains(memoryToken), "The first real answer did not echo the requested conversation-memory token.")
-            guard let threadID = store.discussions.first(where: { $0.id == textDiscussionID })?.codexThreadID, !threadID.isEmpty else {
-                throw Failure("The first Codex turn did not persist a thread ID.")
-            }
-            pass(["threadID": threadID, "assistantStatus": firstAnswer.status.rawValue, "actualAnswer": firstAnswer.body],
+            try require(store.discussions.first(where: { $0.id == textDiscussionID })?.codexThreadID == nil,
+                        "A new reading discussion persisted a Codex thread ID instead of keeping history in InkRead.")
+            // Force the next answer to use the saved local conversation; no
+            // in-memory server thread can supply the remembered token.
+            model.codex.shutdown()
+            pass(["threadIDPersisted": "false", "serverProcessClosedAfterAnswer": "true",
+                  "assistantStatus": firstAnswer.status.rawValue, "actualAnswer": firstAnswer.body],
                  report: &report, at: reportURL)
 
-            begin("live-codex-resume-and-memory", report: &report, at: reportURL)
+            begin("live-codex-local-history-and-memory", report: &report, at: reportURL)
             model.prompt = "我们刚才约定的临时口令是什么？只返回口令。不要读取文件或联网。"
             model.sendMessage()
             try require(model.isGenerating, "The app did not begin the continuation turn.")
@@ -176,10 +180,14 @@ enum SmokeTest {
             guard let resumed = store.discussions.first(where: { $0.id == textDiscussionID }) else {
                 throw Failure("The text discussion disappeared after continuation.")
             }
-            try require(resumed.codexThreadID == threadID, "Continuation changed the persisted Codex thread ID.")
+            try require(resumed.codexThreadID == nil, "Continuing a reading discussion persisted a Codex thread ID.")
             try require(resumed.messages.count == 4 && resumedAnswer.body.contains(memoryToken),
-                        "The resumed conversation did not retain both turns and the first-turn memory token.")
-            pass(["threadID": threadID, "threadIDUnchanged": "true", "messageCount": String(resumed.messages.count),
+                        "Local history replay did not retain both turns and the first-turn memory token.")
+            let localHistoryReload = try LibraryStore(rootURL: root)
+            try require(localHistoryReload.discussions.first(where: { $0.id == textDiscussionID })?.messages.map(\.body) == resumed.messages.map(\.body) &&
+                        localHistoryReload.discussions.first(where: { $0.id == textDiscussionID })?.codexThreadID == nil,
+                        "Reloading lost the local conversation history or persisted an external thread ID.")
+            pass(["threadIDPersisted": "false", "historyFromLocalMessages": "true", "messageCount": String(resumed.messages.count),
                   "memoryTokenRemembered": "true", "actualAnswer": resumedAnswer.body], report: &report, at: reportURL)
 
             begin("reader-chart-region-png", report: &report, at: reportURL)
@@ -240,8 +248,8 @@ enum SmokeTest {
                         "Reloading the actual manifest did not recover one book, two discussions and one note.")
             try require(reopened.discussions.first(where: { $0.id == textDiscussionID })?.messages.count == 4,
                         "Reloading lost a text-discussion turn.")
-            try require(reopened.discussions.first(where: { $0.id == textDiscussionID })?.codexThreadID == threadID,
-                        "Reloading lost the reusable Codex thread ID.")
+            try require(reopened.discussions.first(where: { $0.id == textDiscussionID })?.codexThreadID == nil,
+                        "Reloading found an external thread ID in a newly created private reading discussion.")
             try require(reopened.discussions.first(where: { $0.id == chartDiscussionID })?.anchor == chartAnchor &&
                         reopened.notes.first?.body == chartAnswer.body,
                         "Reloading lost the image anchor or real assistant note.")
@@ -264,6 +272,7 @@ enum SmokeTest {
             pass(["path": markdownURL.path, "bytes": String(markdown.utf8.count),
                   "containsBothDiscussionsAndRealNote": "true", "containsPDFAndImageSourceLinks": "true"],
                  report: &report, at: reportURL)
+            var historicalImageDiscussionID = chartDiscussionID
             if environment["INKREAD_SMOKE_EXTENDED"] == "1" {
                 begin("multi-material-basket-and-two-images", report: &report, at: reportURL)
                 model.clearContextBasket()
@@ -277,6 +286,7 @@ enum SmokeTest {
                 try require(model.contextItems.count == 3, "Basket did not preserve prose plus two different chart crops")
                 model.startDiscussion(useSelection: false)
                 guard let combinedID = model.currentDiscussion?.id else { throw Failure("Could not create a combined discussion") }
+                historicalImageDiscussionID = combinedID
                 model.prompt = "只根据本次材料，按两张图片的顺序给出柱名和数值，格式 A=数值; B=数值。然后用一句中文概括文字材料主题。不要读取文件或联网。"
                 model.sendMessage()
                 try require(model.isGenerating, "Combined turn did not start")
@@ -394,6 +404,43 @@ enum SmokeTest {
                 pass(["termID": translatedTerm.id.uuidString, "scope": translatedTerm.scope,
                       "capturedSourceRetained": "true", "repeatSaveIsIdempotent": "true", "reloadAndJumpPassed": "true"],
                      report: &report, at: reportURL)
+            }
+            if privateChecks {
+                begin("private-local-history-replays-prior-images", report: &report, at: reportURL)
+                model.selectedDiscussionID = historicalImageDiscussionID
+                model.clearContextBasket(); model.clearReaderSelection()
+                model.codex.shutdown()
+                guard let historical = model.currentDiscussion else { throw Failure("The image-history discussion is missing.") }
+                let previousSources = historical.messages.filter { $0.role == .user }
+                    .flatMap { ($0.contextItems ?? []).flatMap(\.anchors) }.compactMap(\.imageRelativePath)
+                try require(!previousSources.isEmpty && model.contextItems.isEmpty && model.selection == nil,
+                            "The prior-image replay test did not isolate the saved message sources.")
+                model.prompt = "请核对这条讨论之前给你的图片，A 和 B 两根柱分别是什么颜色？不要从之前的数值回答推测，不要读取文件或联网。只输出一行 A=颜色; B=颜色。"
+                model.sendMessage()
+                try require(model.isGenerating, "The private historical-image follow-up did not start.")
+                try await wait(until: { !model.isGenerating }, deadline: deadline, label: "private historical-image follow-up")
+                let imageFollowup = try completedAnswer(in: model, discussionID: historicalImageDiscussionID)
+                let colors = imageFollowup.body.lowercased()
+                try require(colors.range(of: #"a\s*[:=：]\s*[^;；\n]*(蓝|blue)"#, options: .regularExpression) != nil &&
+                            colors.range(of: #"b\s*[:=：]\s*[^;；\n]*(绿|green)"#, options: .regularExpression) != nil,
+                            "The private follow-up could not identify previously unasked image colors: \(imageFollowup.body)")
+                try require(model.currentDiscussion?.codexThreadID == nil,
+                            "The historical-image follow-up persisted an external Codex thread ID.")
+                pass(["actualAnswer": imageFollowup.body, "priorImageCount": String(Set(previousSources).count),
+                      "liveBasketEmpty": "true", "selectionCleared": "true",
+                      "primaryAnchorAbsent": String(historical.anchor == nil), "freshServerProcess": "true"],
+                     report: &report, at: reportURL)
+
+                begin("private-requests-absent-from-stored-codex-threads", report: &report, at: reportURL)
+                model.codex.shutdown()
+                let storedThreads = try await model.codex.listStoredThreads(workspaceURL: workspace)
+                try require(storedThreads.isEmpty,
+                            "Private reading requests appeared in Codex's stored thread list for this isolated book: \(storedThreads.map(\.id).joined(separator: ", ")).")
+                try require(store.discussions.allSatisfy { $0.codexThreadID == nil },
+                            "An isolated reading discussion saved an external Codex thread ID.")
+                model.codex.shutdown()
+                pass(["exactWorkspace": workspace.path, "storedCodexThreads": "0", "localDiscussionsPreserved": String(store.discussions.count),
+                      "newDiscussionThreadIDsNil": "true", "checkedAfterServerProcessRestart": "true"], report: &report, at: reportURL)
             }
             report.status = "passed"
             model.notice = "真实 Codex 集成自测通过，报告与测试书库已保存。"

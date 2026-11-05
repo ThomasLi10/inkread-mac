@@ -58,7 +58,6 @@ struct CodexGenerationControls: View {
                 .disabled(model.isLoadingModels || model.isBusy)
         } label: {
             HStack(spacing: 5) {
-                Image(systemName: "cpu").font(.system(size: 11))
                 Text(model.modelSelectionTitle).lineLimit(1).truncationMode(.middle)
                 Image(systemName: "chevron.down").font(.system(size: 7, weight: .semibold))
             }
@@ -86,8 +85,7 @@ struct CodexGenerationControls: View {
             }
         } label: {
             HStack(spacing: 4) {
-                Image(systemName: "slider.horizontal.3").font(.system(size: 11))
-                Text(model.effortSelectionTitle).lineLimit(1)
+                Text("Effort " + (model.selectedCodexEffort.isEmpty ? "默认" : model.selectedCodexEffort)).lineLimit(1)
                 Image(systemName: "chevron.down").font(.system(size: 7, weight: .semibold))
             }
             .foregroundStyle(.secondary)

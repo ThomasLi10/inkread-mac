@@ -55,6 +55,8 @@ struct SettingsView: View {
                 .disabled(model.isBusy || model.isTranslating)
                 Text("复用 Codex 自己的登录。提交的选段与图表会发往所用模型服务；阅读副本、笔记和讨论保存在本机。")
                     .font(.system(size: 12)).foregroundStyle(.secondary)
+                Text("墨读使用临时会话，阅读讨论只保存在墨读书库，不进入 Codex 的最近会话列表。")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
             }
             Section("书库") {
                 Button("在 Finder 中打开本地书库") {

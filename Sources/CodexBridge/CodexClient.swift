@@ -74,6 +74,9 @@ public final class CodexClient: ObservableObject {
         "/Applications/Codex.app/Contents/Resources/codex"
     ]
 
+    /// Every request uses a fresh in-memory thread. Conversation history belongs
+    /// to InkRead and must be supplied in `prompt` by the caller. `threadID` is
+    /// retained for source compatibility with older callers, never resumed.
     public func respond(
         threadID: String?, prompt: String, imageURL: URL?, imageURLs: [URL] = [], workspaceURL: URL,
         model: String? = nil, effort: String? = nil,
@@ -99,29 +102,32 @@ public final class CodexClient: ObservableObject {
                 try checkActive(state)
                 let selection = try await resolveModelSelection(model: model, effort: effort)
                 try checkActive(state)
-                state.activity(threadID == nil ? "正在创建本书的讨论…" : "正在续接讨论…")
+                state.activity("正在创建阅读临时会话…")
                 var config = disabledMCPConfig
-                // Resume must replace any previous per-turn override as well.
-                // An explicit null clears an inherited optional effort for a
-                // custom provider absent from the standard model catalog.
+                // Keep the selected model's optional effort separate from any
+                // inherited CLI configuration for a custom provider.
                 config["model_reasoning_effort"] = selection.effort.map { $0 as Any } ?? NSNull()
-                var params: [String: Any] = [
+                let params: [String: Any] = [
                     "cwd": workspaceURL.standardizedFileURL.path,
                     "sandbox": "read-only", "approvalPolicy": "never",
                     "config": config,
                     "model": selection.model,
+                    "ephemeral": true,
                     "developerInstructions": Self.readingInstructions
                 ]
-                let response: [String: Any]
-                if let threadID, !threadID.isEmpty {
-                    params["threadId"] = threadID
-                    response = try await request("thread/resume", params: params)
-                } else {
-                    response = try await request("thread/start", params: params)
-                }
+                // Never resume even a legacy saved ID: resume cannot convert a
+                // durable Codex session into a temporary one, and would expose
+                // new InkRead messages in Codex's stored conversation list.
+                let response = try await request("thread/start", params: params)
                 try checkActive(state)
-                guard let thread = response["thread"] as? [String: Any], let id = thread["id"] as? String else {
-                    throw CodexBridgeError.protocolFailure("创建或恢复会话后缺少 thread.id")
+                guard let thread = response["thread"] as? [String: Any], let id = thread["id"] as? String, !id.isEmpty else {
+                    throw CodexBridgeError.protocolFailure("创建临时会话后缺少 thread.id")
+                }
+                guard thread["ephemeral"] as? Bool == true else {
+                    throw CodexBridgeError.protocolFailure("本机 Codex 没有采用临时会话，已停止发送以免进入 Codex 最近会话")
+                }
+                if let path = thread["path"], !(path is NSNull) {
+                    throw CodexBridgeError.protocolFailure("本机 Codex 为临时会话返回了持久化路径，已停止发送")
                 }
                 // Never silently continue a server that ignored our explicit policy.
                 guard let policy = response["sandbox"] as? [String: Any], policy["type"] as? String == "readOnly" else {
@@ -162,8 +168,8 @@ public final class CodexClient: ObservableObject {
                       let turnID = turn["id"] as? String, !turnID.isEmpty else {
                     throw CodexBridgeError.protocolFailure("turn/start 缺少 turn.id")
                 }
-                // Only the RPC response identifies this submitted turn. Resuming
-                // a thread may replay an older turn's notifications beforehand.
+                // Only the RPC response identifies this submitted turn; stale
+                // notifications for earlier work must never claim it.
                 state.turnID = turnID
                 state.awaitingTurnStart = false
                 let queued = state.queuedTurnEvents
@@ -206,6 +212,62 @@ public final class CodexClient: ObservableObject {
             let models = try await fetchModelCatalog()
             modelCatalog = models
             return models.filter { !$0.hidden }
+        } catch {
+            disconnect(error: error)
+            throw error
+        }
+    }
+
+    /// Reads stored metadata for the explicitly scoped book workspaces. An empty
+    /// list means this workspace only, never every conversation in Codex.
+    public func listStoredThreads(workspaceURL: URL, cwds: [String] = []) async throws -> [CodexStoredThread] {
+        guard !isRunning else { throw CodexBridgeError.busy }
+        let requested = cwds.isEmpty ? [workspaceURL.standardizedFileURL.path] : cwds
+        guard requested.allSatisfy({ $0.hasPrefix("/") }) else {
+            throw CodexBridgeError.protocolFailure("会话检查需要明确的书籍工作区绝对路径")
+        }
+        var allowed = Set<String>()
+        for path in requested {
+            let url = URL(fileURLWithPath: path).standardizedFileURL
+            allowed.insert(url.path)
+            allowed.insert(url.resolvingSymlinksInPath().standardizedFileURL.path)
+        }
+        isRunning = true
+        defer { isRunning = false }
+        do {
+            try await connect(workspace: workspaceURL)
+            var cursor: String?
+            var visited = Set<String>()
+            var ids = Set<String>()
+            var threads: [CodexStoredThread] = []
+            repeat {
+                var params: [String: Any] = [
+                    "cwd": allowed.sorted(), "archived": false, "limit": 100,
+                    "sourceKinds": ["cli", "vscode", "exec", "appServer", "unknown"]
+                ]
+                if let cursor { params["cursor"] = cursor }
+                let response = try await request("thread/list", params: params)
+                guard let entries = response["data"] as? [[String: Any]] else {
+                    throw CodexBridgeError.protocolFailure("会话检查缺少线程元数据")
+                }
+                for entry in entries {
+                    let data = try JSONSerialization.data(withJSONObject: entry)
+                    let thread: CodexStoredThread
+                    do { thread = try JSONDecoder().decode(CodexStoredThread.self, from: data) }
+                    catch { throw CodexBridgeError.protocolFailure("会话检查返回了无效的线程元数据") }
+                    let canonical = URL(fileURLWithPath: thread.cwd).resolvingSymlinksInPath().standardizedFileURL.path
+                    guard allowed.contains(thread.cwd) || allowed.contains(canonical) else { continue }
+                    if ids.insert(thread.id).inserted { threads.append(thread) }
+                }
+                if let raw = response["nextCursor"], !(raw is NSNull), !(raw is String) {
+                    throw CodexBridgeError.protocolFailure("会话检查分页游标无效")
+                }
+                cursor = (response["nextCursor"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+                if let cursor, !visited.insert(cursor).inserted {
+                    throw CodexBridgeError.protocolFailure("会话检查分页没有前进")
+                }
+            } while cursor != nil
+            return threads
         } catch {
             disconnect(error: error)
             throw error
@@ -319,7 +381,7 @@ public final class CodexClient: ObservableObject {
                 self.receive(event)
             }
         }
-        _ = try await request("initialize", params: ["clientInfo": ["name": "inkread", "title": "InkRead", "version": "0.4.0"], "capabilities": ["experimentalApi": false]])
+        _ = try await request("initialize", params: ["clientInfo": ["name": "inkread", "title": "InkRead", "version": "0.5.0"], "capabilities": ["experimentalApi": false]])
         try transport.write(["method": "initialized"])
         // Obtain only configured MCP names, never their credentials. Disable each
         // inherited server at thread scope before starting any model turn.

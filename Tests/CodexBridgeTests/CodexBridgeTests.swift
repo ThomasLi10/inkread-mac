@@ -52,7 +52,7 @@ final class CodexBridgeTests: XCTestCase {
     }
 
     @MainActor
-    func testFakeProcessStreamsAndReusesPersistedThreadWithExplicitReadOnlyPolicy() async throws {
+    func testFakeProcessStreamsInPrivateThreadsAndNeverResumesALegacyID() async throws {
         let fixture = try FakeServer(mode: "stream")
         defer { fixture.remove() }
         let client = CodexClient(executableOverride: fixture.executable.path, requestTimeout: 2, turnTimeout: 3)
@@ -68,10 +68,18 @@ final class CodexBridgeTests: XCTestCase {
         XCTAssertFalse(client.isRunning)
         let messages = try fixture.requests()
         XCTAssertEqual(messages.filter { $0["method"] as? String == "initialize" }.count, 1)
-        let resumed = try XCTUnwrap(messages.first { $0["method"] as? String == "thread/resume" }?["params"] as? [String: Any])
-        XCTAssertEqual(resumed["sandbox"] as? String, "read-only")
-        XCTAssertEqual(resumed["approvalPolicy"] as? String, "never")
-        let config = try XCTUnwrap(resumed["config"] as? [String: Any])
+        let starts = messages.filter { $0["method"] as? String == "thread/start" }
+        XCTAssertEqual(starts.count, 2)
+        XCTAssertFalse(messages.contains { $0["method"] as? String == "thread/resume" })
+        for start in starts {
+            let params = try XCTUnwrap(start["params"] as? [String: Any])
+            XCTAssertEqual(params["ephemeral"] as? Bool, true)
+            XCTAssertNil(params["threadId"])
+        }
+        let latest = try XCTUnwrap(starts.last?["params"] as? [String: Any])
+        XCTAssertEqual(latest["sandbox"] as? String, "read-only")
+        XCTAssertEqual(latest["approvalPolicy"] as? String, "never")
+        let config = try XCTUnwrap(latest["config"] as? [String: Any])
         let servers = try XCTUnwrap(config["mcp_servers"] as? [String: [String: Any]])
         XCTAssertEqual(servers["unsafe"]?["enabled"] as? Bool, false)
         XCTAssertEqual(servers["unsafe"]?["command"] as? String, "/usr/bin/false")
@@ -105,7 +113,77 @@ final class CodexBridgeTests: XCTestCase {
     }
 
     @MainActor
-    func testModelAndEffortOverridesChangeOnResumeAndResetToCLIConfigDefaults() async throws {
+    func testPrivateRequestsRefuseNonEphemeralOrMaterializedThreadsWithoutSubmittingATurn() async throws {
+        for mode in ["notEphemeral", "missingEphemeral", "materializedEphemeral"] {
+            let fixture = try FakeServer(mode: mode)
+            defer { fixture.remove() }
+            let client = CodexClient(executableOverride: fixture.executable.path, requestTimeout: 2, turnTimeout: 3)
+            defer { client.shutdown() }
+            var announcedThread = false
+            do {
+                _ = try await respond(client, fixture: fixture, threadID: "legacy-durable-thread", onThread: { _ in announcedThread = true })
+                XCTFail("\(mode) must not silently fall back to a stored session")
+            } catch {
+                guard case .protocolFailure = error as? CodexBridgeError else { return XCTFail("Unexpected error: \(error)") }
+            }
+            XCTAssertFalse(client.isRunning)
+            XCTAssertFalse(announcedThread)
+            let requests = try fixture.requests()
+            XCTAssertEqual(requests.filter { $0["method"] as? String == "thread/start" }.count, 1)
+            XCTAssertFalse(requests.contains { ["thread/resume", "turn/start"].contains($0["method"] as? String ?? "") })
+        }
+    }
+
+    @MainActor
+    func testStoredThreadAuditIsScopedMetadataOnlyAndPaginatesWithoutReturningOtherWorkspaces() async throws {
+        let fixture = try FakeServer(mode: "storedMetadata")
+        defer { fixture.remove() }
+        let client = CodexClient(executableOverride: fixture.executable.path, requestTimeout: 2, turnTimeout: 3)
+        defer { client.shutdown() }
+        let threads = try await client.listStoredThreads(workspaceURL: fixture.workspace)
+        XCTAssertEqual(threads.map(\.id), ["owned-one", "owned-two"])
+        XCTAssertTrue(threads.allSatisfy { $0.cwd == fixture.workspace.path && !$0.ephemeral })
+        XCTAssertEqual(threads.first?.originator, "inkread")
+        XCTAssertEqual(threads.first?.source, "appServer")
+        XCTAssertNil(threads.last?.source, "Structured future source variants should not prevent metadata-only auditing")
+        let requests = try fixture.requests()
+        let pages = requests.filter { $0["method"] as? String == "thread/list" }
+        XCTAssertEqual(pages.count, 2)
+        for page in pages {
+            let params = try XCTUnwrap(page["params"] as? [String: Any])
+            let scopes = try XCTUnwrap(params["cwd"] as? [String])
+            XCTAssertTrue(scopes.contains(fixture.workspace.path))
+            XCTAssertFalse(scopes.contains("/"))
+            XCTAssertEqual(params["archived"] as? Bool, false)
+        }
+        XCTAssertFalse(requests.contains { ["thread/read", "thread/start", "thread/resume", "turn/start", "thread/archive", "thread/delete"].contains($0["method"] as? String ?? "") })
+    }
+
+    @MainActor
+    func testStoredThreadAuditAcceptsExactSymlinkScopeAndRejectsUnboundedPagination() async throws {
+        let fixture = try FakeServer(mode: "storedMetadata")
+        defer { fixture.remove() }
+        let alias = fixture.workspace.appendingPathComponent("workspace-alias")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: fixture.workspace)
+        let client = CodexClient(executableOverride: fixture.executable.path, requestTimeout: 2, turnTimeout: 3)
+        defer { client.shutdown() }
+        let threads = try await client.listStoredThreads(workspaceURL: fixture.workspace, cwds: [alias.path])
+        XCTAssertEqual(threads.count, 2)
+        let loop = try FakeServer(mode: "storedMetadataLoop")
+        defer { loop.remove() }
+        let broken = CodexClient(executableOverride: loop.executable.path, requestTimeout: 2, turnTimeout: 3)
+        defer { broken.shutdown() }
+        do {
+            _ = try await broken.listStoredThreads(workspaceURL: loop.workspace)
+            XCTFail("Repeated pagination cursor must fail")
+        } catch {
+            XCTAssertEqual(error as? CodexBridgeError, .protocolFailure("会话检查分页没有前进"))
+        }
+        XCTAssertFalse(broken.isRunning)
+    }
+
+    @MainActor
+    func testModelAndEffortOverridesChangeBetweenPrivateRequestsAndResetToCLIConfigDefaults() async throws {
         let fixture = try FakeServer(mode: "stream")
         defer { fixture.remove() }
         let client = CodexClient(executableOverride: fixture.executable.path, requestTimeout: 2, turnTimeout: 3)
@@ -119,6 +197,7 @@ final class CodexBridgeTests: XCTestCase {
         let starts = requests.filter { ["thread/start", "thread/resume"].contains($0["method"] as? String ?? "") }
         let turns = requests.filter { $0["method"] as? String == "turn/start" }
         XCTAssertEqual(starts.count, 3)
+        XCTAssertTrue(starts.allSatisfy { $0["method"] as? String == "thread/start" })
         XCTAssertEqual(turns.count, 3)
         for (index, expected) in [("future-model", "future-effort"), ("configured-model", "low"), ("configured-model", "medium")].enumerated() {
             let start = try XCTUnwrap(starts[index]["params"] as? [String: Any])
@@ -189,7 +268,7 @@ final class CodexBridgeTests: XCTestCase {
     }
 
     @MainActor
-    func testFakeProcessMultipleImagesPreserveOrderAndLegacyImageDeduplicationOnResume() async throws {
+    func testFakeProcessMultipleImagesPreserveOrderAndLegacyImageDeduplicationInPrivateRequests() async throws {
         let fixture = try FakeServer(mode: "stream")
         defer { fixture.remove() }
         let client = CodexClient(executableOverride: fixture.executable.path, requestTimeout: 2, turnTimeout: 3)
@@ -221,9 +300,8 @@ final class CodexBridgeTests: XCTestCase {
 
         let requests = try fixture.requests()
         XCTAssertEqual(requests.filter { $0["method"] as? String == "initialize" }.count, 1)
-        XCTAssertEqual(requests.filter { $0["method"] as? String == "thread/start" }.count, 1)
-        let resumed = try XCTUnwrap(requests.first { $0["method"] as? String == "thread/resume" }?["params"] as? [String: Any])
-        XCTAssertEqual(resumed["threadId"] as? String, persistedThread)
+        XCTAssertEqual(requests.filter { $0["method"] as? String == "thread/start" }.count, 2)
+        XCTAssertFalse(requests.contains { $0["method"] as? String == "thread/resume" })
         let turns = requests.filter { $0["method"] as? String == "turn/start" }
         XCTAssertEqual(turns.count, 2)
         for turn in turns {
@@ -276,7 +354,7 @@ final class CodexBridgeTests: XCTestCase {
     }
 
     @MainActor
-    func testFakeProcessResumeReplayCannotClaimNewTurnAndEarlyEventsAreReplayed() async throws {
+    func testFakeProcessStaleReplayCannotClaimNewTurnAndEarlyEventsAreReplayed() async throws {
         for mode in ["resumeReplay", "earlyTurnEvents"] {
             let fixture = try FakeServer(mode: mode)
             defer { fixture.remove() }
@@ -299,7 +377,8 @@ final class CodexBridgeTests: XCTestCase {
             XCTAssertFalse(client.isRunning)
             let requests = try fixture.requests()
             XCTAssertEqual(requests.filter { $0["method"] as? String == "turn/start" }.count, 2)
-            XCTAssertEqual(requests.filter { $0["method"] as? String == "thread/resume" }.count, 1)
+            XCTAssertEqual(requests.filter { $0["method"] as? String == "thread/start" }.count, 2)
+            XCTAssertFalse(requests.contains { $0["method"] as? String == "thread/resume" })
         }
     }
 
@@ -458,8 +537,15 @@ private struct FakeServer {
                     reply(req,{'data':[first] if not req['params'].get('cursor') else [first,future,hidden],'nextCursor':'next-page' if not req['params'].get('cursor') else None})
                 else:
                     reply(req,{'data':[first,future],'nextCursor':'same-page' if mode=='catalogLoop' else (42 if mode=='catalogCursorMalformed' else None)})
+            elif method=='thread/list':
+                owned={'id':'owned-one','cwd':os.path.dirname(logfile),'originator':'inkread','source':'appServer','ephemeral':False,'path':os.path.join(os.path.dirname(logfile),'owned.jsonl'),'turns':[]}
+                unrelated=dict(owned,id='unrelated',cwd=os.path.join(os.path.dirname(logfile),'unrelated'))
+                other=dict(owned,id='owned-two',source={'custom':'future-client'})
+                reply(req,{'data':[owned,unrelated] if not req['params'].get('cursor') else [owned,other,unrelated],'nextCursor':'metadata-page' if not req['params'].get('cursor') or mode=='storedMetadataLoop' else None})
             elif method in ['thread/start','thread/resume']:
-                reply(req,{'thread':{'id':'thread-1'},'sandbox':{'type':'dangerFullAccess' if mode=='unsafePolicy' else 'readOnly'},'approvalPolicy':'never'})
+                thread={'id':'thread-1','ephemeral':mode!='notEphemeral','path':logfile if mode=='materializedEphemeral' else None}
+                if mode=='missingEphemeral': del thread['ephemeral']
+                reply(req,{'thread':thread,'sandbox':{'type':'dangerFullAccess' if mode=='unsafePolicy' else 'readOnly'},'approvalPolicy':'never'})
             elif method=='mcpServerStatus/list':
                 if mode in ['resumeReplay','earlyTurnEvents'] and turn_count>0:
                     replay_old('turn-'+str(turn_count),'answer-'+str(turn_count+1))

@@ -28,6 +28,9 @@ final class ProcessTransport: @unchecked Sendable {
         process.currentDirectoryURL = workspace
         var environment = ProcessInfo.processInfo.environment
         // Do not print or copy credentials out of the official client's environment.
+        // A development launch from Codex Desktop must not label InkRead's own
+        // child requests as if the desktop application had created them.
+        environment.removeValue(forKey: "CODEX_INTERNAL_ORIGINATOR_OVERRIDE")
         environment["NO_COLOR"] = "1"
         environment["TERM"] = "dumb"
         let extraPaths = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]

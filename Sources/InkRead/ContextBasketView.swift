@@ -2,84 +2,134 @@ import SwiftUI
 import AppKit
 import InkReadCore
 
-/// Editable material for a future send. SentContextSnapshot below deliberately
-/// reads ChatMessage.contextItems instead of this live, persistent basket.
+/// One compact preview of the actual next-send materials. Advanced attachment
+/// management is disclosed on demand; opening it never mutates the context.
 struct ContextBasketView: View {
     @ObservedObject var model: AppModel
     var compact = false
-    @State private var expanded = false
+    @State private var presented = false
 
-    private var basketImageCount: Int {
-        Set(model.contextItems.flatMap(\.anchors).compactMap(\.imageRelativePath)).count
-    }
-
-    private var nextSendCount: Int {
-        if let discussion = model.currentDiscussion { return model.effectiveContext(for: discussion).count }
-        guard let book = model.selectedBook else { return model.contextItems.count }
-        // Preview the new thread's prospective anchor without saving an image or
-        // creating a discussion. Actual historical snapshots still come only
-        // from ChatMessage.contextItems after the model submits the question.
+    private var nextMaterials: [ContextItem] {
+        if let discussion = model.currentDiscussion { return model.effectiveContext(for: discussion) }
+        guard let book = model.selectedBook else { return model.contextItems }
+        // A new discussion will capture this selection when the question is
+        // sent. Preview its geometry without writing an image or starting a chat.
         let anchor = model.selection.map { selection in
             SourceAnchor(documentID: book.id, pageIndex: selection.pageIndex, pageLabel: selection.pageLabel,
                          rects: selection.rects, selectedText: selection.text.isEmpty ? nil : selection.text)
         }
-        return model.effectiveContext(for: Discussion(documentID: book.id, anchor: anchor)).count
+        return model.effectiveContext(for: Discussion(documentID: book.id, anchor: anchor))
+    }
+
+    private var selectionIncluded: Bool {
+        guard let selection = model.selection else { return false }
+        return nextMaterials.contains { item in item.anchors.contains {
+            $0.documentID == model.selectedBookID && $0.pageIndex == selection.pageIndex && $0.rects == selection.rects
+        } }
+    }
+
+    private var canAttachSelection: Bool { model.selection != nil && !selectionIncluded }
+
+    private var summary: String {
+        if nextMaterials.isEmpty { return "引用原文（可选）" }
+        if nextMaterials.count == 1, let item = nextMaterials.first,
+           item.noteID == nil, item.discussionID == nil, let anchor = item.anchors.first {
+            return "引用原文 · PDF \(anchor.pageIndex + 1)"
+        }
+        return "引用 \(nextMaterials.count) 项材料"
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 7) {
-                Button { expanded.toggle() } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.system(size: 8, weight: .semibold))
-                        Image(systemName: "tray").font(.system(size: 11.5))
-                        Text("上下文篮").font(.system(size: 12, weight: .medium))
-                        Text(String(model.contextItems.count)).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
-                        if basketImageCount > 0 {
-                            Label(String(basketImageCount), systemImage: "photo")
-                                .font(.system(size: 10)).foregroundStyle(.tertiary)
-                                .help("篮中材料关联 \(basketImageCount) 张图表")
-                        }
-                    }.foregroundStyle(.secondary)
-                }.buttonStyle(.plain)
-                Spacer(minLength: 0)
-                Text("下次发送 \(nextSendCount) 项").font(.system(size: 11)).foregroundStyle(.secondary)
-                if !model.contextItems.isEmpty {
-                    Button("清空") { model.clearContextBasket() }
-                        .font(.system(size: 11)).buttonStyle(.plain).foregroundStyle(.secondary)
-                        .disabled(model.isBusy).help("清空待发送材料，不影响已经发送的消息")
-                }
-                Menu {
-                    Button("加入当前选区", action: model.addSelectionToContext).disabled(model.selection == nil)
-                    if let discussion = model.currentDiscussion {
-                        Button("加入当前讨论") { model.addDiscussionToContext(discussion) }
-                    }
-                } label: { Image(systemName: "plus").font(.system(size: 11)) }
-                    .menuStyle(.borderlessButton).fixedSize().foregroundStyle(.secondary)
-                    .disabled(model.isBusy || model.selectedBook == nil).help("添加待讨论的材料")
+        HStack(spacing: 10) {
+            Button { presented.toggle() } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "paperclip").font(.system(size: 11))
+                    Text(summary).font(.system(size: 12)).lineLimit(1)
+                    Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
+                }.foregroundStyle(.secondary).contentShape(Rectangle())
+            }.buttonStyle(.plain)
+                .disabled(model.selectedBook == nil)
+                .help("查看下一问会带入的原文、笔记与附加材料")
+                .accessibilityLabel("本次引用：" + summary)
+                .popover(isPresented: $presented, arrowEdge: .top) { materialDetails }
+            Spacer(minLength: 0)
+            if canAttachSelection {
+                Button("附上选区", action: model.addSelectionToContext)
+                    .buttonStyle(.plain).font(.system(size: 12, weight: .medium)).foregroundStyle(Color.accent)
+                    .disabled(model.isBusy).help("把刚选中的内容附到下一次提问")
             }
-            if expanded {
-                if model.contextItems.isEmpty {
-                    Text(nextSendCount > 0 ? "篮中暂无附加材料；讨论引用会随下一问发送。" : "把选区、笔记或回答加入这里；添加材料不会自动发送。")
-                        .font(.system(size: 11.5)).lineSpacing(2).foregroundStyle(.tertiary)
-                } else {
-                    ScrollView {
-                        VStack(spacing: 0) {
-                            ForEach(model.contextItems) { item in
+        }.frame(minHeight: 25).padding(.horizontal, 3)
+            .onChange(of: model.selectedBookID) { _, _ in presented = false }
+    }
+
+    private var materialDetails: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("本次引用").font(.system(size: 14, weight: .semibold))
+                Spacer()
+                Text("\(nextMaterials.count) 项").font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary)
+            }
+            Text("下面的材料会随下一问发送。")
+                .font(.system(size: 12)).foregroundStyle(.secondary)
+            if canAttachSelection, let selection = model.selection {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("刚选中的内容 · PDF \(selection.pageIndex + 1)")
+                        .font(.system(size: 12, weight: .medium))
+                    Text(selection.imageData == nil ? String(selection.text.prefix(240)) : "一处图表选区")
+                        .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(3)
+                    HStack {
+                        Button("附到这次提问", action: model.addSelectionToContext).foregroundStyle(Color.accent)
+                            .disabled(model.isBusy)
+                        Spacer()
+                        Button("清除选区", action: model.clearReaderSelection).foregroundStyle(.secondary)
+                    }.font(.system(size: 12)).buttonStyle(.plain)
+                }.padding(11).background(Color.accent.opacity(0.06), in: RoundedRectangle(cornerRadius: 7))
+            }
+            if nextMaterials.isEmpty {
+                Text("可以直接询问本书，也可以先在 PDF 中选中文字或图表。")
+                    .font(.system(size: 13)).foregroundStyle(.secondary).lineSpacing(3).padding(.vertical, 10)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(nextMaterials) { item in
+                            if model.contextItems.contains(where: { $0.id == item.id }) {
                                 ContextMaterialRow(item: item, model: model, remove: { model.removeContextItem(id: item.id) })
+                            } else {
+                                ContextMaterialRow(item: item, model: model, remove: nil)
                             }
                         }
-                    }.frame(height: min(compact ? 68 : 126, CGFloat(model.contextItems.count) * 54))
-                    Text("材料会留在篮中，方便下一问继续使用。")
-                        .font(.system(size: 10.5)).foregroundStyle(.tertiary)
-                }
+                    }
+                }.frame(height: min(compact ? 230 : 300, CGFloat(nextMaterials.count) * 58))
             }
-        }
-        .padding(.horizontal, 3).padding(.vertical, 3)
-        .onChange(of: model.contextItems.count) { previous, current in
-            if previous == 0, current > 0 { expanded = true }
-        }
-        .onChange(of: model.selectedBookID) { _, _ in expanded = false }
+            if model.currentDiscussion?.anchor != nil {
+                Text("这条讨论会保留最初的原文引用；新讨论可更换引用。")
+                    .font(.system(size: 11.5)).foregroundStyle(.secondary).lineSpacing(2)
+            }
+            WorkbenchHairline()
+            HStack {
+                Menu("添加材料") {
+                    Button("附上当前选区", action: model.addSelectionToContext)
+                        .disabled(model.selection == nil || selectionIncluded)
+                    if model.selection != nil {
+                        Button("为选区新建讨论") {
+                            let draft = model.prompt
+                            model.startDiscussion()
+                            model.prompt = draft
+                            presented = false
+                        }
+                        Button("固定选区为参考位置", action: model.pinSelection)
+                    }
+                    if let discussion = model.currentDiscussion {
+                        Button("附上整段讨论") { model.addDiscussionToContext(discussion) }
+                    }
+                }.menuStyle(.borderlessButton).fixedSize().disabled(model.isBusy)
+                Spacer(minLength: 0)
+                if !model.contextItems.isEmpty {
+                    Button("清除附加材料", action: model.clearContextBasket)
+                        .buttonStyle(.plain).foregroundStyle(.secondary).disabled(model.isBusy)
+                }
+            }.font(.system(size: 12))
+        }.padding(17).frame(width: 350)
     }
 }
 
@@ -93,21 +143,21 @@ struct SentContextSnapshot: View {
     var body: some View {
         if let items {
             Button { presented.toggle() } label: {
-                Label("本次材料 \(items.count)", systemImage: "paperclip")
+                Label("引用 \(items.count) 项", systemImage: "paperclip")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
             .popover(isPresented: $presented, arrowEdge: .leading) {
                 VStack(alignment: .leading, spacing: 11) {
                     HStack {
-                        Text("此次发送的材料").font(.system(size: 14, weight: .semibold))
+                        Text("这次发送的引用").font(.system(size: 14, weight: .semibold))
                         Spacer()
                         Text("\(items.count) 项").font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary)
                     }
-                    Text("以下是发送时保存的快照，与现在的上下文篮独立。")
+                    Text("以下是这条问题发送时使用的材料，之后的修改不会影响它。")
                         .font(.system(size: 11.5)).lineSpacing(3).foregroundStyle(.secondary)
                     if items.isEmpty {
-                        Text("这次发送没有附加篮中材料。原讨论引用及已有对话仍由对应讨论保留。")
+                        Text("这次没有附加材料，仍会延续本讨论已有的对话。")
                             .font(.system(size: 12.5)).lineSpacing(3).foregroundStyle(.secondary).padding(.vertical, 8)
                     } else {
                         ScrollView {
@@ -120,7 +170,7 @@ struct SentContextSnapshot: View {
             }
             .help("查看这条消息实际发送时保存的材料")
         } else {
-            Text("旧消息 · 未记录材料快照").font(.system(size: 10.5)).foregroundStyle(.tertiary)
+            Text("旧消息未记录引用明细").font(.system(size: 10.5)).foregroundStyle(.tertiary)
         }
     }
 }

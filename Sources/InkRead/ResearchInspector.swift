@@ -6,9 +6,8 @@ import InkReadCore
 /// through AppModel; choosing another passage never changes a thread implicitly.
 struct ResearchInspector: View {
     @ObservedObject var model: AppModel
-    @State private var historyExpanded = false
+    @State private var showingHistory = false
     @State private var historyQuery = ""
-    @State private var sourceExpanded = false
     @State private var expandedNoteIDs = Set<UUID>()
     @State private var unsavedExpanded = true
     @State private var followsLatest = true
@@ -25,11 +24,8 @@ struct ResearchInspector: View {
             header
             separator
             if model.rightTab == 0 {
-                history
-                if let discussion = model.currentDiscussion {
-                    activeContext(discussion)
-                    separator
-                }
+                discussionToolbar
+                separator
                 conversation.frame(minHeight: availableHeight < 740 ? 100 : 140)
                 composer
             } else if model.rightTab == 1 {
@@ -37,7 +33,6 @@ struct ResearchInspector: View {
             } else {
                 KnowledgePanel(model: model)
             }
-            connectionFooter
         }
         .background(Color.paper)
         .background(GeometryReader { geometry in
@@ -60,7 +55,6 @@ struct ResearchInspector: View {
         }
         .onChange(of: model.selectedBookID) { _, _ in
             historyQuery = ""
-            sourceExpanded = false
             followsLatest = true
             lastScrollOffset = 0
         }
@@ -85,33 +79,14 @@ struct ResearchInspector: View {
 
     private var header: some View {
         HStack(alignment: .center, spacing: 15) {
-            tab("讨论", count: model.discussions.count, value: 0)
+            tab("讨论", count: nil, value: 0)
             tab("笔记", count: totalNotes, value: 1)
-            tab("整理", count: nil, value: 2)
+            tab("知识库", count: nil, value: 2)
             Spacer(minLength: 0)
-            if model.rightTab == 0 {
-                Button {
-                    model.startDiscussion(useSelection: false)
-                    promptFocused = true
-                } label: {
-                    Label("新讨论", systemImage: "plus").font(.system(size: 12.5, weight: .medium))
-                }.buttonStyle(.plain).foregroundStyle(.secondary)
-                    .disabled(model.selectedBook == nil || model.isBusy)
-                    .help("创建关于本书的新讨论")
-            } else if model.rightTab == 1 {
+            if model.rightTab == 1 {
                 Button { model.openNoteEditor() } label: {
                     Label("写笔记", systemImage: "square.and.pencil").font(.system(size: 12.5, weight: .medium))
                 }.buttonStyle(.plain).foregroundStyle(.secondary).disabled(model.selectedBook == nil || model.isBusy)
-            } else {
-                Menu {
-                    Button("新增疑问") { model.openQuestionEditor() }
-                    Button("新增术语") { model.openTermEditor() }
-                    Button("固定当前页") { model.pinCurrentPage() }
-                    Divider()
-                    Button("编辑书籍标签") { model.openTagsEditor() }
-                } label: { Image(systemName: "plus").font(.system(size: 13)) }
-                    .menuStyle(.borderlessButton).fixedSize().foregroundStyle(.secondary)
-                    .disabled(model.selectedBook == nil || model.isBusy).help("添加知识记录")
             }
         }
         .padding(.horizontal, 18).frame(height: 47)
@@ -131,47 +106,61 @@ struct ResearchInspector: View {
         }.buttonStyle(.plain).accessibilityLabel(count.map { "\(title)，\($0) 项" } ?? title)
     }
 
-    private var history: some View {
-        VStack(spacing: 0) {
-            Button { withAnimation(.easeInOut(duration: 0.14)) { historyExpanded.toggle() } } label: {
-                HStack(spacing: 7) {
-                    Image(systemName: historyExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 10, weight: .semibold)).frame(width: 9)
-                    Text("讨论记录").font(.system(size: 12.5, weight: .medium))
-                    if !historyExpanded, let title = model.currentDiscussion?.title {
-                        Text(title).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
-                    }
-                    Spacer(minLength: 0)
-                    Text(String(model.discussions.count)).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(.tertiary)
-                }.foregroundStyle(.secondary).padding(.horizontal, 18).frame(height: 33).contentShape(Rectangle())
-            }.buttonStyle(.plain)
-            if historyExpanded {
-                if model.discussions.isEmpty {
-                    Text("尚无讨论").font(.system(size: 12.5)).foregroundStyle(.tertiary)
-                        .frame(maxWidth: .infinity, alignment: .leading).padding(.leading, 34).padding(.bottom, 12)
-                } else {
-                    HStack(spacing: 6) {
-                        Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(.tertiary)
-                        TextField("查找讨论", text: $historyQuery).font(.system(size: 12.5)).textFieldStyle(.plain)
-                        if !historyQuery.isEmpty {
-                            Button { historyQuery = "" } label: { Image(systemName: "xmark.circle.fill").font(.system(size: 11)) }
-                                .buttonStyle(.plain).foregroundStyle(.tertiary).help("清除搜索")
-                        }
-                    }.padding(.horizontal, 18).padding(.bottom, 7)
-                    ScrollView {
-                        LazyVStack(spacing: 2) {
-                            ForEach(historyResults) { discussion in historyRow(discussion) }
-                            if historyResults.isEmpty {
-                                Text("没有匹配的讨论").font(.system(size: 12.5)).foregroundStyle(.tertiary)
-                                    .frame(maxWidth: .infinity, alignment: .leading).padding(12)
-                            }
-                        }.padding(.horizontal, 9).padding(.bottom, 7)
-                    }
-                    .frame(maxHeight: CGFloat(min(max(historyResults.count, 1), 3)) * 48 + 7)
+    private var discussionToolbar: some View {
+        HStack(spacing: 12) {
+            Text(model.currentDiscussion?.title ?? "新讨论")
+                .font(.system(size: 13, weight: .medium)).lineLimit(1)
+                .help(model.currentDiscussion?.title ?? "围绕本书或选中的原文提问")
+                .contextMenu { discussionActions }
+            Spacer(minLength: 0)
+            Button { showingHistory.toggle() } label: {
+                Label("历史", systemImage: "clock.arrow.circlepath").font(.system(size: 12))
+            }.buttonStyle(.plain).foregroundStyle(.secondary).help("查找和继续之前的讨论")
+                .popover(isPresented: $showingHistory, arrowEdge: .bottom) { historyPopover }
+            Button {
+                model.startDiscussion(useSelection: false)
+                promptFocused = true
+            } label: {
+                Image(systemName: "plus").font(.system(size: 12, weight: .medium))
+                    .frame(width: 24, height: 26).contentShape(Rectangle())
+            }.buttonStyle(.plain).foregroundStyle(.secondary)
+                .disabled(model.selectedBook == nil || model.isBusy)
+                .help("新建讨论").accessibilityLabel("新建讨论")
+        }.padding(.horizontal, 18).frame(height: 43)
+    }
+
+    @ViewBuilder private var discussionActions: some View {
+        if let discussion = model.currentDiscussion {
+            Button("重命名讨论") { model.renameDiscussion() }.disabled(model.isBusy)
+            Button("整段讨论加入引用材料") { model.addDiscussionToContext(discussion) }.disabled(model.isBusy)
+            Button("记为疑问") { model.createQuestionFromDiscussion(discussion) }.disabled(model.isBusy)
+            questionStatusMenu(discussion)
+        }
+    }
+
+    private var historyPopover: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("历史讨论").font(.system(size: 14, weight: .semibold))
+                Text("\(model.discussions.count)").font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary)
+                Spacer()
+                if model.currentDiscussion != nil {
+                    Menu { discussionActions } label: { Image(systemName: "ellipsis") }
+                        .menuStyle(.borderlessButton).fixedSize().help("当前讨论的更多操作")
                 }
             }
-            separator
-        }
+            SearchField(placeholder: "查找标题、原文或讨论内容", text: $historyQuery)
+            if historyResults.isEmpty {
+                Text(model.discussions.isEmpty ? "尚无讨论。先在下方输入一个问题。" : "没有匹配的讨论。")
+                    .font(.system(size: 13)).foregroundStyle(.secondary).padding(.vertical, 12)
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 3) {
+                        ForEach(historyResults) { discussion in historyRow(discussion) }
+                    }
+                }.frame(height: min(330, CGFloat(historyResults.count) * 49))
+            }
+        }.padding(16).frame(width: 350)
     }
 
     private func historyRow(_ discussion: Discussion) -> some View {
@@ -179,7 +168,7 @@ struct ResearchInspector: View {
         let answers = discussion.messages.filter { $0.role == .assistant && $0.status == .completed }.count
         return Button {
             model.selectedDiscussionID = discussion.id
-            sourceExpanded = false
+            showingHistory = false
         } label: {
             HStack(spacing: 9) {
                 RoundedRectangle(cornerRadius: 1).fill(selected ? Color.accent : .clear).frame(width: 2, height: 25)
@@ -211,62 +200,10 @@ struct ResearchInspector: View {
                     model.selectedDiscussionID = discussion.id
                     model.renameDiscussion()
                 }.disabled(model.isBusy)
-                Button("加入上下文篮") { model.addDiscussionToContext(discussion) }.disabled(model.isBusy)
+                Button("加入引用材料") { model.addDiscussionToContext(discussion) }.disabled(model.isBusy)
                 Button("记为疑问") { model.createQuestionFromDiscussion(discussion) }.disabled(model.isBusy)
                 questionStatusMenu(discussion)
             }
-    }
-
-    private func activeContext(_ discussion: Discussion) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                Text(discussion.title).font(.system(size: 13, weight: .medium)).lineLimit(1)
-                Spacer(minLength: 0)
-                Menu {
-                    Button("重命名讨论") { model.renameDiscussion() }
-                    Button("整段讨论加入上下文") { model.addDiscussionToContext(discussion) }
-                    Button("记为疑问") { model.createQuestionFromDiscussion(discussion) }
-                    questionStatusMenu(discussion)
-                } label: { Image(systemName: "ellipsis").font(.system(size: 13)) }
-                    .menuStyle(.borderlessButton).fixedSize().foregroundStyle(.secondary).disabled(model.isBusy)
-            }.padding(.horizontal, 18).padding(.top, 10).padding(.bottom, 2)
-            if let anchor = discussion.anchor {
-                HStack(spacing: 7) {
-                    Button { withAnimation(.easeInOut(duration: 0.14)) { sourceExpanded.toggle() } } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: anchor.imageRelativePath == nil ? "text.quote" : "crop")
-                            Text("讨论引用 · PDF \(anchor.pageIndex + 1)").fontWeight(.medium)
-                            Image(systemName: sourceExpanded ? "chevron.up" : "chevron.down").font(.system(size: 8, weight: .semibold))
-                        }.font(.system(size: 12))
-                    }.buttonStyle(.plain).foregroundStyle(.secondary)
-                    Spacer(minLength: 4)
-                    Button { model.jumpTo(anchor) } label: {
-                        Label("回到原文", systemImage: "arrow.up.left").font(.system(size: 11.5))
-                    }.buttonStyle(.plain).foregroundStyle(Color.accent)
-                    Menu {
-                        Button("此引用加入上下文") { model.addAnchorToContext(anchor) }
-                        Button("固定为参考位置") { model.pinAnchor(anchor) }
-                    } label: { Image(systemName: "ellipsis").font(.system(size: 12)) }
-                        .menuStyle(.borderlessButton).fixedSize().foregroundStyle(.secondary).disabled(model.isBusy)
-                }.padding(.horizontal, 18).frame(height: 35)
-                if sourceExpanded {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 9) {
-                            if let path = anchor.imageRelativePath, let url = model.store?.assetURL(relativePath: path) {
-                                InspectorImagePreview(url: url).frame(maxHeight: 140)
-                            }
-                            if let quote = anchor.selectedText, !quote.isEmpty {
-                                Text(quote).font(.system(size: 13)).lineSpacing(3).foregroundStyle(.secondary).textSelection(.enabled)
-                            }
-                        }.padding(.horizontal, 18).padding(.bottom, 12)
-                    }.frame(maxHeight: 165)
-                }
-            } else {
-                Text("本书讨论 · 可按需添加材料")
-                    .font(.system(size: 11.5)).foregroundStyle(.tertiary)
-                    .padding(.horizontal, 18).padding(.top, 5).padding(.bottom, 10)
-            }
-        }
     }
 
     private func questionStatusMenu(_ discussion: Discussion) -> some View {
@@ -296,8 +233,16 @@ struct ResearchInspector: View {
                     if let discussion = model.currentDiscussion, !discussion.messages.isEmpty {
                         ForEach(discussion.messages) { message in messageRow(message) }
                     } else {
-                        Text(model.selectedBook == nil ? "打开一份 PDF 后开始讨论。" : "输入问题，或选中原文后讨论。")
-                            .font(.system(size: 13)).foregroundStyle(.tertiary).padding(.top, 9)
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text(model.selectedBook == nil ? "从一份 PDF 开始" : "把疑问留在原文旁")
+                                .font(.system(size: 17, weight: .medium))
+                            Text(model.selectedBook == nil ? "导入书籍或论文后，就可以边读边问。" : "选中原文 → 输入问题 → 保存有用的回答")
+                                .font(.system(size: 13)).foregroundStyle(.secondary).lineSpacing(5)
+                            if model.selectedBook != nil {
+                                Text("也可以直接询问本书，无需先选中内容。")
+                                    .font(.system(size: 12)).foregroundStyle(.secondary).lineSpacing(3)
+                            }
+                        }.padding(.top, 14)
                     }
                     if let error = model.lastResponseError, !error.isEmpty, !model.isGenerating {
                         responseFailure(error)
@@ -392,17 +337,22 @@ struct ResearchInspector: View {
                 SentContextSnapshot(items: message.contextItems, model: model)
             }
             if !body.isEmpty {
-                HStack(spacing: 13) {
-                    Button { copy(body) } label: { Label("复制", systemImage: "doc.on.doc") }
+                HStack(spacing: 16) {
                     if message.role == .assistant && message.status == .completed {
-                        Button { model.openNoteEditor(answer: message) } label: { Label("笔记", systemImage: "bookmark") }
-                            .disabled(model.isBusy).help("将这条回答存为笔记")
+                        Button { model.openNoteEditor(answer: message) } label: {
+                            Label("保存笔记", systemImage: "bookmark")
+                        }.disabled(model.isBusy).foregroundStyle(Color.accent)
+                            .help("将这条回答和原文引用一起保存")
                     }
-                    Button { model.addMessageToContext(message) } label: { Label("加入上下文", systemImage: "tray.and.arrow.down") }
-                        .disabled(model.isBusy).help("把这条消息加入待发送的上下文篮")
-                    Button { model.forkDiscussion(through: message) } label: { Label("分支", systemImage: "arrow.triangle.branch") }
-                        .disabled(model.isBusy || message.status == .inProgress).help("从这条消息开启独立讨论，保留原讨论")
-                }.buttonStyle(.plain).font(.system(size: 11.5)).foregroundStyle(.secondary)
+                    Button { copy(body) } label: { Label("复制", systemImage: "doc.on.doc") }
+                    Menu {
+                        Button("加入引用材料") { model.addMessageToContext(message) }
+                            .disabled(model.isBusy)
+                        Button("从这里另开讨论") { model.forkDiscussion(through: message) }
+                            .disabled(model.isBusy || message.status == .inProgress)
+                    } label: { Image(systemName: "ellipsis").frame(width: 20) }
+                        .menuStyle(.borderlessButton).fixedSize().help("更多消息操作")
+                }.buttonStyle(.plain).font(.system(size: 12)).foregroundStyle(.secondary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -412,8 +362,8 @@ struct ResearchInspector: View {
                 Button("存为笔记") { model.openNoteEditor(answer: message) }.disabled(model.isBusy)
             }
             if !body.isEmpty {
-                Button("加入上下文篮") { model.addMessageToContext(message) }.disabled(model.isBusy)
-                Button("从此处开启分支") { model.forkDiscussion(through: message) }
+                Button("加入引用材料") { model.addMessageToContext(message) }.disabled(model.isBusy)
+                Button("从这里另开讨论") { model.forkDiscussion(through: message) }
                     .disabled(model.isBusy || message.status == .inProgress)
             }
         }
@@ -477,40 +427,7 @@ struct ResearchInspector: View {
                 }.padding(.horizontal, 3).padding(.vertical, 3)
             }
             ContextBasketView(model: model, compact: availableHeight < 740)
-            if let selection = model.selection {
-                HStack(spacing: 6) {
-                    Image(systemName: selection.imageData == nil ? "text.quote" : "crop").font(.system(size: 11))
-                    Text("选区 · PDF \(selection.pageIndex + 1)").font(.system(size: 11.5))
-                    Spacer(minLength: 4)
-                    Button("加入材料", action: model.addSelectionToContext)
-                        .buttonStyle(.plain).font(.system(size: 11.5, weight: .medium)).foregroundStyle(Color.accent)
-                        .disabled(model.isBusy).help("只加入上下文篮，不会自动发送")
-                    Button {
-                        let draft = model.prompt
-                        model.startDiscussion()
-                        model.prompt = draft
-                        promptFocused = true
-                    } label: { Text("单独讨论").font(.system(size: 11.5)) }
-                        .buttonStyle(.plain).foregroundStyle(Color.accent).disabled(model.isBusy)
-                        .help("为当前选区新建讨论，保留已有讨论的引用")
-                    Menu {
-                        Button("固定为参考位置", action: model.pinSelection)
-                        Button("写选区笔记") { model.openNoteEditor() }
-                    } label: { Image(systemName: "ellipsis").font(.system(size: 11)) }
-                        .menuStyle(.borderlessButton).fixedSize().foregroundStyle(.secondary).disabled(model.isBusy)
-                    Button { model.clearReaderSelection() } label: { Image(systemName: "xmark").font(.system(size: 10)) }
-                        .buttonStyle(.plain).foregroundStyle(.tertiary).help("清除当前选区")
-                }.foregroundStyle(.secondary)
-            }
-            HStack(spacing: 14) {
-                preset("解释", text: "请解释当前材料的核心含义，指出关键前提，并引用原文页码。")
-                preset("推导", text: "请逐步补全相关公式的推导，说明每一步使用的假设、符号和适用条件。")
-                preset("举例", text: "请用一个具体的小例子说明当前材料，再给出一个容易误用的反例。")
-                preset("检验", text: "请检查这项结论的假设、证据与适用边界，指出还需要核实的地方。")
-                Spacer(minLength: 0)
-            }.padding(.horizontal, 4)
-            VStack(spacing: 4) {
-                CodexGenerationControls(model: model).padding(.horizontal, 4)
+            VStack(spacing: 8) {
                 TextEditor(text: $model.prompt)
                     .font(.system(size: 15)).lineSpacing(3).scrollContentBackground(.hidden)
                     .frame(height: composerHeight)
@@ -519,27 +436,30 @@ struct ResearchInspector: View {
                     .onAppear { if !model.prompt.isEmpty || model.currentDiscussion?.messages.isEmpty == true { DispatchQueue.main.async { promptFocused = true } } }
                     .overlay(alignment: .topLeading) {
                         if model.prompt.isEmpty {
-                            Text(model.selectedBook == nil ? "先打开一份 PDF" : model.isGenerating ? "可以先写下一问，稍后发送…" : "围绕原文继续提问…")
+                            Text(model.selectedBook == nil ? "先打开一份 PDF" : model.isGenerating ? "先写下一问，稍后发送…" : "输入关于原文的问题…")
                                 .font(.system(size: 15)).foregroundStyle(.tertiary)
                                 .padding(.leading, 5).padding(.top, 1).allowsHitTesting(false)
                         }
                     }
-                HStack(spacing: 8) {
+                HStack(spacing: 12) {
                     Menu {
-                        Picker("回复方式", selection: $model.replyStyle) {
-                            Text(ReplyStyle.concise.title).tag(ReplyStyle.concise)
-                            Text(ReplyStyle.detailed.title).tag(ReplyStyle.detailed)
-                            Text(ReplyStyle.socratic.title).tag(ReplyStyle.socratic)
-                        }
+                        preset("解释这段内容", text: "请解释当前材料的核心含义，指出关键前提，并引用原文页码。")
+                        preset("补全公式推导", text: "请逐步补全相关公式的推导，说明每一步使用的假设、符号和适用条件。")
+                        preset("举个具体例子", text: "请用一个具体的小例子说明当前材料，再给出一个容易误用的反例。")
+                        preset("检查前提与证据", text: "请检查这项结论的假设、证据与适用边界，指出还需要核实的地方。")
                     } label: {
-                        HStack(spacing: 4) {
-                            Text(model.replyStyle.title)
-                            Image(systemName: "chevron.down").font(.system(size: 7, weight: .semibold))
-                        }.font(.system(size: 11.5)).foregroundStyle(.secondary)
+                        Text("提问建议").font(.system(size: 12)).foregroundStyle(.secondary)
                     }.menuStyle(.borderlessButton).fixedSize()
-                    Spacer(minLength: 2)
-                    Text(model.isGenerating ? "下一问草稿" : "⌘ Return")
-                        .font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary)
+                    Menu {
+                        Text("回答方式")
+                        replyStyleOption("简短", explanation: "先说结论，保留重点", style: .concise)
+                        replyStyleOption("详细解释", explanation: "展开推导和例子", style: .detailed)
+                        replyStyleOption("引导思考", explanation: "用问题检验理解", style: .socratic)
+                    } label: {
+                        Text("选项").font(.system(size: 12)).foregroundStyle(.secondary)
+                    }.menuStyle(.borderlessButton).fixedSize().help("选择 Codex 的回答方式")
+                    Spacer(minLength: 0)
+                    Text("⌘↵").font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary)
                     Button(action: model.sendMessage) { Label("发送", systemImage: "arrow.up").font(.system(size: 12, weight: .medium)) }
                         .buttonStyle(.borderedProminent).foregroundStyle(Color.onAccent).controlSize(.small).tint(Color.accent)
                         .keyboardShortcut(.return, modifiers: .command)
@@ -553,7 +473,8 @@ struct ResearchInspector: View {
                 Color.clear.onAppear { composerWidth = geometry.size.width }
                     .onChange(of: geometry.size.width) { _, value in composerWidth = value }
             })
-        }.padding(.horizontal, 13).padding(.top, 8).padding(.bottom, 11)
+            CodexGenerationControls(model: model).padding(.horizontal, 3)
+        }.padding(.horizontal, 13).padding(.top, 9).padding(.bottom, 12)
     }
 
     private var composerHeight: CGFloat {
@@ -572,6 +493,13 @@ struct ResearchInspector: View {
         .buttonStyle(.plain).font(.system(size: 11.5)).foregroundStyle(.secondary)
         .disabled(model.selectedBook == nil || model.isImporting || model.isOrganizing)
         .help("填入提问草稿，不会自动发送")
+    }
+
+    private func replyStyleOption(_ title: String, explanation: String, style: ReplyStyle) -> some View {
+        Button { model.replyStyle = style } label: {
+            if model.replyStyle == style { Label(title + " · " + explanation, systemImage: "checkmark") }
+            else { Text(title + " · " + explanation) }
+        }
     }
 
     private func elapsed(since start: Date, now: Date) -> String {
@@ -617,7 +545,7 @@ struct ResearchInspector: View {
                 Menu {
                     Button("编辑笔记") { model.openNoteEditor(existing: note) }.disabled(model.isBusy)
                     Button("复制内容") { copy(note.body) }
-                    Button("加入上下文篮") { model.addNoteToContext(note) }.disabled(model.isBusy)
+                    Button("加入引用材料") { model.addNoteToContext(note) }.disabled(model.isBusy)
                     Divider()
                     Button("删除笔记", role: .destructive) { model.deleteNote(note) }.disabled(model.isBusy)
                 } label: { Image(systemName: "ellipsis").font(.system(size: 13)) }
@@ -652,35 +580,9 @@ struct ResearchInspector: View {
         }.padding(.horizontal, 18).padding(.vertical, 17).frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var connectionFooter: some View {
-        VStack(spacing: 0) {
-            separator
-            HStack(spacing: 6) {
-                Image(systemName: "terminal").font(.system(size: 10))
-                Text(model.codex.connectionStatus == "Codex 已连接" ? "本机 Codex · 已连接" : ["Codex 已断开", "尚未连接 Codex"].contains(model.codex.connectionStatus) ? "本机 Codex · 按需连接" : model.codex.connectionStatus)
-                    .lineLimit(1).help(model.codex.connectionStatus)
-                Spacer(minLength: 2)
-                if !model.isGenerating, model.unsavedReply == nil, model.notice == "讨论已自动保存" {
-                    Label("已保存", systemImage: "checkmark").lineLimit(1)
-                }
-            }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 15).frame(height: 28)
-        }
-    }
-
     private func copy(_ text: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
-    }
-}
-
-private struct InspectorImagePreview: View {
-    let url: URL
-    @State private var image: NSImage?
-
-    var body: some View {
-        Group {
-            if let image { Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: .infinity, alignment: .leading) }
-        }.task(id: url) { image = NSImage(contentsOf: url) }
     }
 }
 

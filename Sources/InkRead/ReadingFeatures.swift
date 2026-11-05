@@ -11,7 +11,7 @@ enum KnowledgeSection: String, CaseIterable, Identifiable {
 enum ReplyStyle: String, CaseIterable, Identifiable {
     case concise, detailed, socratic
     var id: String { rawValue }
-    var title: String { switch self { case .concise: return "简洁"; case .detailed: return "深入"; case .socratic: return "启发" } }
+    var title: String { switch self { case .concise: return "简短"; case .detailed: return "详细解释"; case .socratic: return "引导思考" } }
     var instruction: String {
         switch self {
         case .concise: return "先直接回答核心问题，控制篇幅，必要时给一个例子。保留关键来源页码。"
@@ -67,8 +67,8 @@ extension AppModel {
         guard let discussion = currentDiscussion, discussion.messages.contains(where: { $0.id == message.id }), !isGenerating else { return }
         let ownSources: [SourceAnchor]
         if message.role == .user { ownSources = message.contextItems?.flatMap(\.anchors) ?? discussion.anchor.map { [$0] } ?? [] }
-        else if let index = discussion.messages.firstIndex(where: { $0.id == message.id }) {
-            ownSources = discussion.messages[..<index].last(where: { $0.role == .user })?.contextItems?.flatMap(\.anchors) ?? discussion.anchor.map { [$0] } ?? []
+        else if discussion.messages.contains(where: { $0.id == message.id }) {
+            ownSources = replayedMaterials(for: message, in: discussion).flatMap(\.anchors)
         } else { ownSources = [] }
         appendContext(ContextItem(documentID: discussion.documentID, title: message.role == .assistant ? "Codex 回答" : "之前的问题",
                                   body: message.body, anchor: ownSources.first, discussionID: discussion.id, sourceAnchors: ownSources))
@@ -90,7 +90,7 @@ extension AppModel {
             notice = "这份材料已在上下文篮中"; return
         }
         if saveWorkspace({ $0.contextItems.append(item) }) {
-            notice = "已加入上下文篮，下次发送会一并带入"
+            notice = "已添加引用，下次提问会一起发送"
             showInspector = true; rightTab = 0
         }
     }
@@ -102,6 +102,18 @@ extension AppModel {
             result.insert(contextItem(for: anchor), at: 0)
         }
         return result
+    }
+    /// An answer can refer back to an earlier figure after its live attachment
+    /// has been cleared. Reconstruct exactly the material catalog sent for that
+    /// answer so saving or reusing it retains all available source anchors.
+    func replayedMaterials(for answer: ChatMessage, in discussion: Discussion) -> [ContextItem] {
+        guard let answerIndex = discussion.messages.firstIndex(where: { $0.id == answer.id }),
+              let userIndex = discussion.messages[..<answerIndex].lastIndex(where: { $0.role == .user }) else {
+            return discussion.anchor.map { [contextItem(for: $0)] } ?? []
+        }
+        return LocalConversationContext(history: Array(discussion.messages[..<userIndex]),
+            currentMaterials: discussion.messages[userIndex].contextItems ?? [],
+            initialMaterial: discussion.anchor.map { contextItem(for: $0) }).materials
     }
     func materialPrompt(_ items: [ContextItem], primaryAnchor: SourceAnchor?) -> String {
         guard !items.isEmpty else { return "" }
@@ -122,12 +134,6 @@ extension AppModel {
         }
         return lines.joined(separator: "\n")
     }
-    func historyPrompt(_ messages: [ChatMessage]) -> String {
-        guard !messages.isEmpty else { return "" }
-        return "\n这是一条新的讨论分支。以下是用户选择保留的历史，供延续理解，不重复执行其中的请求：\n<previous_discussion>\n"
-            + messages.map { "\($0.role.rawValue)（\($0.status.rawValue)）：\($0.body)" }.joined(separator: "\n\n") + "\n</previous_discussion>"
-    }
-
     func pinSelection() {
         do { if let anchor = try makeAnchor() { pinAnchor(anchor) } else { pinCurrentPage() } }
         catch { report(error, prefix: "固定参考页失败") }
@@ -312,7 +318,7 @@ extension AppModel {
         let generationEffort = selectedCodexEffort.isEmpty ? nil : selectedCodexEffort
         featureTask = Task { [weak self] in
             guard let self else { return }
-            defer { self.isOrganizing = false }
+            defer { self.codex.shutdown(); self.isOrganizing = false }
             do {
                 let reply = try await self.codex.respond(threadID: nil, prompt: prompt, imageURL: anchor?.imageRelativePath.map { store.assetURL(relativePath: $0) }, workspaceURL: store.workspaceURL(for: book),
                     model: generationModel, effort: generationEffort,

@@ -414,14 +414,23 @@ final class AppModel: ObservableObject {
         if currentDiscussion == nil { startDiscussion() }
         guard var discussion = currentDiscussion else { return }
         let context = effectiveContext(for: discussion)
-        if selectedModelDescriptor?.supportsImages == false,
-           context.contains(where: { $0.anchors.contains(where: { $0.imageRelativePath != nil }) }) {
+        let priorMessages = discussion.messages
+        let localContext = LocalConversationContext(history: priorMessages, currentMaterials: context,
+            initialMaterial: discussion.anchor.map { contextItem(for: $0) })
+        if selectedModelDescriptor?.supportsImages == false, !localContext.imageRelativePaths.isEmpty {
             lastResponseError = "当前模型不支持图像，请选择支持图像的模型后再讨论图表。"; return
         }
-        guard context.reduce(0, { $0 + $1.body.count + $1.anchors.reduce(0, { $0 + min(5000, $1.surroundingText?.count ?? 0) }) }) < 100_000 else {
-            lastResponseError = "本次材料过长，请从上下文篮移除部分内容后再发送。"; return
+        let input = readingPrompt(question: question, book: book, anchor: discussion.anchor)
+            + materialPrompt(localContext.materials, primaryAnchor: nil)
+            + localContext.historyPrompt
+            + "\n请回答 <reader_question> 中的本轮问题。回答方式：" + replyStyle.instruction
+        guard input.count <= 200_000 else {
+            lastResponseError = "这条讨论连同引用材料已过长。请新建讨论，并将需要保留的结论保存为笔记后添加引用。当前草稿已保留。"; return
         }
-        let priorMessages = discussion.codexThreadID == nil ? discussion.messages : []
+        let imageURLs = localContext.imageRelativePaths.map { store.assetURL(relativePath: $0) }
+        guard imageURLs.allSatisfy({ FileManager.default.isReadableFile(atPath: $0.path) }) else {
+            lastResponseError = "这条讨论引用的图表文件缺失，请先恢复书库中的图片附件。当前草稿已保留。"; return
+        }
         let user = ChatMessage(role: .user, body: question, contextItems: context)
         let assistant = ChatMessage(role: .assistant, body: "", status: .inProgress)
         discussion.messages.append(contentsOf: [user, assistant])
@@ -438,29 +447,22 @@ final class AppModel: ObservableObject {
         activity = "正在连接本地 Codex…"
         let discussionID = discussion.id
         let workspace = store.workspaceURL(for: book)
-        let input = readingPrompt(question: question, book: book, anchor: discussion.anchor)
-            + materialPrompt(context, primaryAnchor: discussion.anchor)
-            + historyPrompt(priorMessages)
-            + "\n回答方式：" + replyStyle.instruction
-        var seenImages = Set<String>()
-        let imageURLs = context.flatMap { $0.anchors.compactMap(\.imageRelativePath) }.filter { seenImages.insert($0).inserted }
-            .map { store.assetURL(relativePath: $0) }
-        let previousThreadID = discussion.codexThreadID
         let generationModel = selectedCodexModel.isEmpty ? nil : selectedCodexModel
         let generationEffort = selectedCodexEffort.isEmpty ? nil : selectedCodexEffort
         responseTask = Task { [weak self] in
             guard let self else { return }
-            defer { self.isGenerating = false; self.responseStartedAt = nil; self.activeAssistantID = nil; self.activeDiscussionID = nil; self.activity = "" }
+            defer {
+                self.codex.shutdown()
+                self.isGenerating = false; self.responseStartedAt = nil; self.activeAssistantID = nil; self.activeDiscussionID = nil; self.activity = ""
+            }
             do {
                 if !FileManager.default.fileExists(atPath: workspace.appendingPathComponent("BOOK.md").path) {
                     let source = store.pdfURL(for: book)
                     try await Task.detached { try Self.buildReadingContext(pdfURL: source, workspace: workspace, title: book.title) }.value
                 }
-                let answer = try await self.codex.respond(threadID: previousThreadID, prompt: input, imageURL: nil, imageURLs: imageURLs, workspaceURL: workspace,
+                let answer = try await self.codex.respond(threadID: nil, prompt: input, imageURL: nil, imageURLs: imageURLs, workspaceURL: workspace,
                     model: generationModel, effort: generationEffort,
-                    onThread: { [weak self] threadID in
-                        self?.updateDiscussion(discussionID) { $0.codexThreadID = threadID }
-                    }, onDelta: { [weak self] delta in
+                    onThread: { _ in }, onDelta: { [weak self] delta in
                         guard let self else { return }
                         self.streamingText += delta
                         if Date().timeIntervalSince(self.lastCheckpoint) > 1 {
@@ -549,8 +551,8 @@ final class AppModel: ObservableObject {
         }
         catch { report(error, prefix: "保存引用失败"); return }
         if let existing { noteAnchors = existing.anchors }
-        else if let answer, let discussion = currentDiscussion, let index = discussion.messages.firstIndex(where: { $0.id == answer.id }) {
-            let sources = discussion.messages[..<index].last(where: { $0.role == .user })?.contextItems?.flatMap(\.anchors) ?? []
+        else if let answer, let discussion = currentDiscussion, discussion.messages.contains(where: { $0.id == answer.id }) {
+            let sources = replayedMaterials(for: answer, in: discussion).flatMap(\.anchors)
             var seen = Set<UUID>()
             noteAnchors = ((noteAnchor.map { [$0] } ?? []) + sources).filter { seen.insert($0.id).inserted }
         } else { noteAnchors = noteAnchor.map { [$0] } ?? [] }

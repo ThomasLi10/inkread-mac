@@ -404,25 +404,33 @@ struct ContentView: View {
                 WorkbenchIcon("清除选区", symbol: "xmark") { model.clearReaderSelection() }
             }
             HStack(spacing: 7) {
-                Button { model.startDiscussion() } label: { Text("讨论此处").font(.system(size: 12, weight: .medium)) }
+                Button { model.startDiscussion() } label: { Text("提问").font(.system(size: 12, weight: .medium)) }
                     .buttonStyle(.borderedProminent).foregroundStyle(Color.onAccent).controlSize(.small).disabled(model.isBusy)
+                    .help("引用这段原文并开始提问")
                 if selection.imageData == nil {
                     Button("翻译", action: model.translateSelection)
                         .font(.system(size: 12, weight: .medium)).buttonStyle(.bordered).controlSize(.small)
                         .disabled(!model.canTranslateSelection).help("结合当前页语境翻译选中的英文  ⇧⌘T")
                 }
-                WorkbenchIcon("加入上下文篮", symbol: "tray.and.arrow.down") { model.addSelectionToContext() }
-                ForEach(AnnotationColor.allCases, id: \.self) { color in
-                    Button { model.quickAnnotate(color) } label: { Circle().fill(Color(annotationColor: color)).frame(width: 13, height: 13).padding(3) }
-                        .buttonStyle(.plain).help(color.title + (selection.imageData == nil ? "高亮" : "方框")).accessibilityLabel(color.title + "批注")
-                }
+                Button("记笔记") { model.openNoteEditor() }
+                    .font(.system(size: 12)).buttonStyle(.bordered).controlSize(.small)
+                Menu {
+                    ForEach(AnnotationColor.allCases, id: \.self) { color in
+                        Button { model.quickAnnotate(color) } label: {
+                            Label(color.title + (selection.imageData == nil ? "高亮" : "方框"), systemImage: "circle.fill")
+                                .foregroundStyle(Color(annotationColor: color))
+                        }
+                    }
+                    Divider()
+                    Button("批注与备注…") { model.openAnnotationEditor() }
+                } label: { Text("标记").font(.system(size: 12)) }
+                    .menuStyle(.borderlessButton).fixedSize().help("添加颜色或文字批注")
                 Spacer(minLength: 0)
                 Menu {
-                    Button("批注与备注…") { model.openAnnotationEditor() }
-                    Button("添加阅读疑问…") { model.openQuestionEditor() }
-                    Button("收录术语或符号…") { model.openTermEditor() }
-                    Button("固定到参考页") { model.pinSelection() }
-                    Button("写选段笔记…") { model.openNoteEditor() }
+                    Button("添加到引用材料", action: model.addSelectionToContext)
+                    Button("记为待解答的问题…") { model.openQuestionEditor() }
+                    Button("收录到术语手册…") { model.openTermEditor() }
+                    Button("固定为参考页") { model.pinSelection() }
                 } label: { Image(systemName: "ellipsis.circle").font(.system(size: 14)) }.menuStyle(.borderlessButton).fixedSize().help("选区操作")
             }
         }.padding(10).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 9))

@@ -5,15 +5,18 @@ struct KnowledgePanel: View {
     @ObservedObject var model: AppModel
     @State private var search = ""
     @State private var questionFilter: QuestionStatus?
-    @State private var resumeExpanded = true
+    @State private var resumeExpanded = false
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Picker("整理内容", selection: $model.knowledgeSection) {
+                Picker("知识库内容", selection: $model.knowledgeSection) {
                     ForEach(KnowledgeSection.allCases) { Text($0.title).tag($0) }
                 }.pickerStyle(.segmented).labelsHidden()
             }.padding(12)
+            Text(sectionDescription).font(.system(size: 12)).foregroundStyle(.secondary)
+                .lineSpacing(3).frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 15).padding(.bottom, 12)
             HStack(spacing: 7) {
                 SearchField(placeholder: "查找" + model.knowledgeSection.title, text: $search)
                 Menu {
@@ -42,6 +45,14 @@ struct KnowledgePanel: View {
             }
         }
         .onChange(of: model.selectedBookID) { _, _ in search = ""; questionFilter = nil }
+    }
+
+    private var sectionDescription: String {
+        switch model.knowledgeSection {
+        case .questions: return "留下还没弄懂的问题，之后继续讨论。"
+        case .terms: return "保存本书的词义、符号和自己的理解。"
+        case .annotations: return "查看你在 PDF 中留下的标记和批注。"
+        }
     }
 
     private var resumeCard: some View {
