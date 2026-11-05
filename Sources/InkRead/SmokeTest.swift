@@ -234,6 +234,63 @@ enum SmokeTest {
             pass(["path": markdownURL.path, "bytes": String(markdown.utf8.count),
                   "containsBothDiscussionsAndRealNote": "true", "containsPDFAndImageSourceLinks": "true"],
                  report: &report, at: reportURL)
+            if environment["INKREAD_SMOKE_EXTENDED"] == "1" {
+                begin("multi-material-basket-and-two-images", report: &report, at: reportURL)
+                model.clearContextBasket()
+                guard let textAnchor = store.discussions.first(where: { $0.id == textDiscussionID })?.anchor else { throw Failure("Missing original text anchor") }
+                model.addAnchorToContext(textAnchor)
+                for rectangle in [CGRect(x: 115, y: 130, width: 110, height: 230), CGRect(x: 260, y: 130, width: 110, height: 330)] {
+                    guard let data = SelectionPDFView.pngRegion(on: chartPage, rectangle: rectangle) else { throw Failure("Could not capture a second chart crop") }
+                    model.receiveSelection(ReaderSelection(pageIndex: 1, pageLabel: "2", text: "", rects: [PageRect(x: rectangle.minX, y: rectangle.minY, width: rectangle.width, height: rectangle.height)], imageData: data, surroundingText: "A self-created chart crop. Read the image, not any file."))
+                    model.addSelectionToContext()
+                }
+                try require(model.contextItems.count == 3, "Basket did not preserve prose plus two different chart crops")
+                model.startDiscussion(useSelection: false)
+                guard let combinedID = model.currentDiscussion?.id else { throw Failure("Could not create a combined discussion") }
+                model.prompt = "只根据本次材料，按两张图片的顺序给出柱名和数值，格式 A=数值; B=数值。然后用一句中文概括文字材料主题。不要读取文件或联网。"
+                model.sendMessage()
+                try require(model.isGenerating, "Combined turn did not start")
+                model.prompt = "下一问草稿：请进一步解释这个概念。"
+                try await wait(until: { !model.isGenerating }, deadline: deadline, label: "combined text and two-image response")
+                let combined = try completedAnswer(in: model, discussionID: combinedID)
+                try require(combined.body.lowercased().range(of: #"a\s*[:=：]\s*10\b"#, options: .regularExpression) != nil && combined.body.lowercased().range(of: #"b\s*[:=：]\s*20\b"#, options: .regularExpression) != nil, "Combined images were not both read correctly: \(combined.body)")
+                let snapshot = model.currentDiscussion?.messages.first?.contextItems ?? []
+                try require(snapshot.count == 3 && snapshot.compactMap { $0.anchor?.imageRelativePath }.count == 2, "User turn did not retain exact three-material/two-image snapshot")
+                try require(model.prompt.hasPrefix("下一问草稿"), "Completing an answer overwrote the next-question draft")
+                model.clearContextBasket()
+                try require(model.currentDiscussion?.messages.first?.contextItems == snapshot, "Clearing live basket changed a submitted snapshot")
+                model.openNoteEditor(answer: combined)
+                model.noteTitle = "Combined materials conclusion"
+                model.saveNote()
+                try require(store.notes.first(where: { $0.discussionID == combinedID })?.anchors.count == 3, "Combined answer note lost its three source anchors")
+                let reloaded = try LibraryStore(rootURL: root)
+                try require(reloaded.discussions.first(where: { $0.id == combinedID })?.messages.first?.contextItems == snapshot, "Reload lost combined context snapshot")
+                pass(["actualAnswer": combined.body, "materials": "3", "images": "2", "nextDraftPreserved": "true", "noteSourceAnchors": "3", "snapshotIndependentOfBasket": "true"], report: &report, at: reportURL)
+
+                begin("tag-suggestions-and-reviewed-save", report: &report, at: reportURL)
+                model.openTagsEditor()
+                let previousTags = model.selectedBook?.tags ?? []
+                model.suggestTags()
+                try await wait(until: { !model.isOrganizing }, deadline: deadline, label: "Codex tag suggestions")
+                try require(!model.suggestedTags.isEmpty, "Tag suggestions did not parse: \(model.featureStatus)")
+                try require(model.selectedBook?.tags == previousTags, "AI suggestions changed tags before user confirmation")
+                let proposed = model.suggestedTags
+                model.toggleSuggestedTag(proposed[0]); model.saveTags()
+                try require(model.selectedBook?.tags.contains(proposed[0]) == true, "Confirmed tag was not saved")
+                pass(["suggestedTags": proposed.joined(separator: ", "), "reviewRequired": "true"], report: &report, at: reportURL)
+
+                begin("term-suggestion-and-chapter-save", report: &report, at: reportURL)
+                model.receiveSelection(ReaderSelection(pageIndex: 0, pageLabel: "1", text: passage, rects: rects, imageData: nil, surroundingText: fullText))
+                model.openTermEditor(); model.termName = "Spaced review"; model.termScope = "Synthetic page 1"
+                model.suggestTermMeaning()
+                try await wait(until: { !model.isOrganizing }, deadline: deadline, label: "Codex term definition")
+                try require(!model.termMeaning.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, "Term suggestion returned no editable definition: \(model.featureStatus)")
+                try require(store.terms.isEmpty, "Term was saved before user confirmation")
+                let meaning = model.termMeaning; model.saveTerm()
+                let entry = store.terms.first
+                try require(entry?.term == "Spaced review" && entry?.scope == "Synthetic page 1" && entry?.anchors.first?.pageIndex == 0, "Saved term lost chapter or source")
+                pass(["term": "Spaced review", "actualDefinition": meaning, "chapterAndAnchorPreserved": "true", "reviewRequired": "true"], report: &report, at: reportURL)
+            }
             report.status = "passed"
             model.notice = "真实 Codex 集成自测通过，报告与测试书库已保存。"
         } catch {

@@ -7,7 +7,10 @@ struct ContentView: View {
     @ObservedObject var model: AppModel
     @Environment(\.colorScheme) private var colorScheme
     @State private var navigationWidth: CGFloat = 238
-    @State private var inspectorWidth: CGFloat = 390
+    @State private var inspectorWidth: CGFloat = 420
+    @State private var referenceWidth: CGFloat = 350
+    @State private var referenceHeight: CGFloat = 280
+    @State private var resumePopover = false
     @FocusState private var searchFocused: Bool
 
     var body: some View {
@@ -25,9 +28,9 @@ struct ContentView: View {
                         ResearchInspector(model: model).frame(width: inspectorWidth)
                     }
                 }
-                .onChange(of: geometry.size.width) { _, width in
-                    inspectorWidth = min(inspectorWidth, max(330, width - (model.showNavigation ? navigationWidth : 0) - 430))
-                }
+                .onChange(of: geometry.size.width) { _, width in clampInspector(to: width) }
+                .onChange(of: model.showNavigation) { _, _ in clampInspector(to: geometry.size.width) }
+                .onChange(of: navigationWidth) { _, _ in clampInspector(to: geometry.size.width) }
             }
             statusBar
         }
@@ -49,7 +52,12 @@ struct ContentView: View {
             Button("知道了", role: .cancel) { model.errorMessage = nil }
         } message: { Text(model.errorMessage ?? "") }
         .sheet(isPresented: Binding(get: { !CommandLine.arguments.contains("--smoke-test") && model.showNoteEditor }, set: { model.showNoteEditor = $0 })) { NoteEditor(model: model) }
+        .sheet(item: $model.featureSheet, onDismiss: { if model.featureSheet == nil && model.isOrganizing { model.cancelResponse() } }) { ReadingFeatureEditor(model: model, kind: $0) }
         .onDrop(of: [UTType.fileURL], isTargeted: nil, perform: importDrop)
+    }
+
+    private func clampInspector(to width: CGFloat) {
+        inspectorWidth = min(inspectorWidth, max(330, width - (model.showNavigation ? navigationWidth : 0) - 430))
     }
 
     @ToolbarContentBuilder private var toolbar: some ToolbarContent {
@@ -82,6 +90,8 @@ struct ContentView: View {
             Menu {
                 Button("导入 PDF…", action: model.choosePDFs).disabled(model.isBusy)
                 Button("导出本书笔记…", action: model.exportNotes).disabled(model.selectedBook == nil)
+                Button("修订标签…", action: model.openTagsEditor).disabled(model.selectedBook == nil)
+                Button("疑问与术语手册") { model.openKnowledge(.questions) }.disabled(model.selectedBook == nil)
                 if let book = model.selectedBook {
                     Button("重命名书籍…") { model.renameBook(book) }.disabled(model.isBusy)
                     Button("在 Finder 中显示 PDF") {
@@ -134,6 +144,7 @@ struct ContentView: View {
                                         Text("\(book.currentPage + 1) / \(book.pageCount)").font(.system(size: 10, design: .monospaced))
                                         Text("页").font(.system(size: 10))
                                     }.foregroundStyle(.secondary)
+                                    if !book.tags.isEmpty { Text(book.tags.map { "#" + $0 }.joined(separator: " ")).font(.system(size: 10)).foregroundStyle(Color.accent).lineLimit(2) }
                                     GeometryReader { g in
                                         Capsule().fill(Color.secondary.opacity(0.13)).overlay(alignment: .leading) {
                                             Capsule().fill(Color.accent.opacity(0.65)).frame(width: max(2, g.size.width * Double(book.currentPage + 1) / Double(max(1, book.pageCount))))
@@ -145,6 +156,7 @@ struct ContentView: View {
                                 .contentShape(Rectangle())
                         }.buttonStyle(.plain).disabled(model.isBusy)
                             .contextMenu {
+                                Button("修订标签…") { model.selectedBookID = book.id; model.restoreSelection(); model.openTagsEditor() }
                                 Button("重命名书籍…") { model.renameBook(book) }
                                 Button("在 Finder 中显示 PDF") {
                                     if let url = model.store?.pdfURL(for: book) { NSWorkspace.shared.activateFileViewerSelecting([url]) }
@@ -244,16 +256,37 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 readerToolbar(book)
                 WorkbenchHairline()
-                ZStack(alignment: .bottom) {
-                    PDFReaderView(url: store.pdfURL(for: book), captureRegion: model.captureRegion, jump: model.readerJump,
-                                  onSelection: model.receiveSelection, onPageChanged: model.recordPage, highlights: sourceHighlights,
-                                  nightReading: colorScheme == .dark && model.invertPDFInDarkMode, command: model.readerCommand,
-                                  onMetrics: { model.readerMetrics = $0 }, onSearchResults: { model.pdfSearchHits = $0 }, onSearchStatus: { model.pdfSearching = $0 }).id(book.id)
-                    if model.captureRegion {
-                        VStack { Label("拖动框选图表或公式", systemImage: "cursorarrow.square").font(.system(size: 12)).padding(.horizontal, 13).padding(.vertical, 9)
-                                .background(.regularMaterial, in: Capsule()).padding(.top, 15); Spacer() }.allowsHitTesting(false)
+                if model.showResumeCard {
+                    HStack(spacing: 8) {
+                        Image(systemName: "bookmark").foregroundStyle(Color.accent)
+                        Text("继续阅读 · PDF \(model.pageNumber)").font(.system(size: 11, weight: .medium))
+                        if !model.unresolvedQuestions.isEmpty { Text("\(model.unresolvedQuestions.count) 个待解决疑问").font(.system(size: 10.5)).foregroundStyle(.secondary) }
+                        Spacer(minLength: 0)
+                        Button("续读卡") { resumePopover = true }.font(.system(size: 10.5)).buttonStyle(.plain).foregroundStyle(Color.accent)
+                            .popover(isPresented: $resumePopover) { ResumePopover(model: model).frame(width: 330).padding(18) }
+                        WorkbenchIcon("收起续读提示", symbol: "xmark") { model.showResumeCard = false }
+                    }.padding(.horizontal, 12).frame(height: 31).background(Color.accent.opacity(0.04))
+                    WorkbenchHairline()
+                }
+                GeometryReader { geometry in
+                    let sideBySide = geometry.size.width > 820
+                    let layout = sideBySide ? AnyLayout(HStackLayout(spacing: 0)) : AnyLayout(VStackLayout(spacing: 0))
+                    layout {
+                        mainPDF(book, store: store).frame(maxWidth: .infinity, maxHeight: .infinity)
+                        if let anchor = model.pinnedAnchor {
+                            if sideBySide {
+                                PaneDivider(width: $referenceWidth, limits: 250...min(550, max(250, geometry.size.width * 0.48)), reversed: true)
+                            } else {
+                                ReferenceHeightDivider(height: $referenceHeight, limit: 160...max(160, min(420, geometry.size.height * 0.55)))
+                            }
+                            PinnedReferenceView(url: store.pdfURL(for: book), anchor: anchor,
+                                                nightReading: colorScheme == .dark && model.invertPDFInDarkMode,
+                                                onJump: { model.jumpTo(anchor) }, onClose: model.unpinReference)
+                                .frame(width: sideBySide ? min(referenceWidth, geometry.size.width * 0.48) : nil,
+                                       height: sideBySide ? nil : min(referenceHeight, geometry.size.height * 0.55))
+                                .frame(maxHeight: sideBySide ? .infinity : nil)
+                        }
                     }
-                    if let selection = model.selection { selectionBar(selection).padding(16) }
                 }
             }
         } else {
@@ -270,7 +303,29 @@ struct ContentView: View {
         }
     }
 
+    private func mainPDF(_ book: Book, store: LibraryStore) -> some View {
+        ZStack(alignment: .bottom) {
+            PDFReaderView(url: store.pdfURL(for: book), captureRegion: model.captureRegion, jump: model.readerJump,
+                          onSelection: model.receiveSelection, onPageChanged: model.recordPage, highlights: sourceHighlights,
+                          nightReading: colorScheme == .dark && model.invertPDFInDarkMode, command: model.readerCommand,
+                          onMetrics: { model.readerMetrics = $0 }, onSearchResults: { model.pdfSearchHits = $0 }, onSearchStatus: { model.pdfSearching = $0 },
+                          onAnnotationClicked: { id in if let item = model.annotations.first(where: { $0.id == id }) { model.openAnnotationEditor(existing: item) } }).id(book.id)
+            if model.captureRegion {
+                VStack { Label("拖动框选图表或公式", systemImage: "cursorarrow.square").font(.system(size: 12)).padding(.horizontal, 13).padding(.vertical, 9)
+                        .background(.regularMaterial, in: Capsule()).padding(.top, 15); Spacer() }.allowsHitTesting(false)
+            }
+            if let selection = model.selection { selectionBar(selection).padding(12) }
+        }
+    }
+
     private func readerToolbar(_ book: Book) -> some View {
+        ViewThatFits(in: .horizontal) {
+            readerToolbarFull(book)
+            readerToolbarCompact(book)
+        }.frame(height: 47).background(Color.workbenchChrome)
+    }
+
+    private func readerToolbarFull(_ book: Book) -> some View {
         HStack(spacing: 5) {
             WorkbenchIcon("返回上一阅读位置", symbol: "arrow.left", enabled: model.readerMetrics?.canGoBack ?? false) { model.performReader(.back) }
             WorkbenchIcon("前进到下一阅读位置", symbol: "arrow.right", enabled: model.readerMetrics?.canGoForward ?? false) { model.performReader(.forward) }
@@ -290,23 +345,78 @@ struct ContentView: View {
             } label: { Text(model.zoomLabel).font(.system(size: 10.5, design: .monospaced)).frame(width: 44) }.menuStyle(.borderlessButton).fixedSize().help("阅读缩放")
             WorkbenchIcon("放大  ⌘+", symbol: "plus") { model.performReader(.zoomIn) }
             Rectangle().fill(Color.secondary.opacity(0.18)).frame(width: 1, height: 14).padding(.horizontal, 4)
+            Menu {
+                Button("为选区添加彩色批注…") { model.openAnnotationEditor() }.disabled(model.selection == nil)
+                Button("查看本书批注") { model.openKnowledge(.annotations) }
+                Divider()
+                Button("撤销批注操作", action: model.undoAnnotation).disabled(!model.canUndoAnnotation)
+                Button("重做批注操作", action: model.redoAnnotation).disabled(!model.canRedoAnnotation)
+            } label: { Image(systemName: "highlighter").font(.system(size: 11)) }.menuStyle(.borderlessButton).fixedSize().help("彩色批注")
+            WorkbenchIcon("固定当前参考页", symbol: "pin", active: model.pinnedAnchor != nil) { model.pinSelection() }
             WorkbenchIcon(model.captureRegion ? "取消框选图表" : "框选图表", symbol: "crop", active: model.captureRegion) { model.captureRegion.toggle() }
             WorkbenchIcon(model.focusMode ? "退出专注阅读  ⇧⌘F" : "专注阅读  ⇧⌘F", symbol: model.focusMode ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right", active: model.focusMode) { model.toggleFocusMode() }
         }.padding(.horizontal, 10).frame(height: 47).background(Color.workbenchChrome)
     }
 
+    private func readerToolbarCompact(_ book: Book) -> some View {
+        HStack(spacing: 4) {
+            Menu {
+                Button("返回上一阅读位置") { model.performReader(.back) }.disabled(model.readerMetrics?.canGoBack != true)
+                Button("前进到下一阅读位置") { model.performReader(.forward) }.disabled(model.readerMetrics?.canGoForward != true)
+            } label: { Image(systemName: "clock.arrow.circlepath").font(.system(size: 11)) }.menuStyle(.borderlessButton).fixedSize().help("阅读位置历史")
+            WorkbenchIcon("上一页  ⌘↑", symbol: "chevron.up") { model.turnPage(-1) }
+            TextField("页码", text: $model.pageNumber).font(.system(size: 11, design: .monospaced)).textFieldStyle(.plain)
+                .multilineTextAlignment(.center).frame(width: 33, height: 23).background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 4)).onSubmit(model.goToPage).accessibilityLabel("PDF 页码")
+            Text("/ \(book.pageCount)").font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary).fixedSize()
+            WorkbenchIcon("下一页  ⌘↓", symbol: "chevron.down") { model.turnPage(1) }
+            Spacer(minLength: 2)
+            Menu {
+                Button("放大") { model.performReader(.zoomIn) }
+                Button("缩小") { model.performReader(.zoomOut) }
+                Divider()
+                Button("实际大小 100%") { model.performReader(.actualSize) }
+                Button("适合宽度") { model.performReader(.fitWidth) }
+                Button("整页显示") { model.performReader(.fitPage) }
+            } label: { Text(model.zoomLabel).font(.system(size: 10, design: .monospaced)).frame(width: 43) }.menuStyle(.borderlessButton).fixedSize().help("阅读缩放")
+            Menu {
+                Button("为选区添加彩色批注…") { model.openAnnotationEditor() }.disabled(model.selection == nil)
+                Button("查看本书批注") { model.openKnowledge(.annotations) }
+                Button("撤销批注", action: model.undoAnnotation).disabled(!model.canUndoAnnotation)
+                Button("重做批注", action: model.redoAnnotation).disabled(!model.canRedoAnnotation)
+            } label: { Image(systemName: "highlighter").font(.system(size: 11)) }.menuStyle(.borderlessButton).fixedSize().help("彩色批注")
+            WorkbenchIcon("固定参考页", symbol: "pin", active: model.pinnedAnchor != nil) { model.pinSelection() }
+            WorkbenchIcon(model.captureRegion ? "取消框选图表" : "框选图表", symbol: "crop", active: model.captureRegion) { model.captureRegion.toggle() }
+            WorkbenchIcon("切换专注阅读", symbol: "viewfinder", active: model.focusMode) { model.toggleFocusMode() }
+        }.padding(.horizontal, 9).frame(height: 47)
+    }
+
     private func selectionBar(_ selection: ReaderSelection) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: selection.imageData == nil ? "text.quote" : "viewfinder").foregroundStyle(Color.accent)
-            VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 8) {
+                Image(systemName: selection.imageData == nil ? "text.quote" : "viewfinder").foregroundStyle(Color.accent)
                 Text("\(selection.imageData == nil ? "原文" : "图表") · PDF \(selection.pageIndex + 1)").font(.system(size: 10, weight: .medium, design: .monospaced)).foregroundStyle(.secondary)
-                Text(selection.text.isEmpty ? "已选择图表范围" : selection.text.replacingOccurrences(of: "\n", with: " ")).font(.system(size: 11)).lineLimit(1)
-            }.frame(maxWidth: .infinity, alignment: .leading)
-            Button { model.startDiscussion() } label: { Text("讨论此处").font(.system(size: 11, weight: .medium)).padding(.horizontal, 4) }
-                .buttonStyle(.borderedProminent).foregroundStyle(Color.onAccent).controlSize(.small).disabled(model.isBusy)
-            WorkbenchIcon("写选段笔记", symbol: "square.and.pencil") { model.openNoteEditor() }
-            WorkbenchIcon("清除选区", symbol: "xmark") { model.clearReaderSelection() }
-        }.padding(11).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 9))
+                Text(selection.text.replacingOccurrences(of: "\n", with: " ")).font(.system(size: 11)).lineLimit(1)
+                Spacer(minLength: 2)
+                WorkbenchIcon("清除选区", symbol: "xmark") { model.clearReaderSelection() }
+            }
+            HStack(spacing: 7) {
+                Button { model.startDiscussion() } label: { Text("讨论此处").font(.system(size: 11, weight: .medium)) }
+                    .buttonStyle(.borderedProminent).foregroundStyle(Color.onAccent).controlSize(.small).disabled(model.isBusy)
+                WorkbenchIcon("加入上下文篮", symbol: "tray.and.arrow.down") { model.addSelectionToContext() }
+                ForEach(AnnotationColor.allCases, id: \.self) { color in
+                    Button { model.quickAnnotate(color) } label: { Circle().fill(Color(annotationColor: color)).frame(width: 13, height: 13).padding(3) }
+                        .buttonStyle(.plain).help(color.title + (selection.imageData == nil ? "高亮" : "方框")).accessibilityLabel(color.title + "批注")
+                }
+                Spacer(minLength: 0)
+                Menu {
+                    Button("批注与备注…") { model.openAnnotationEditor() }
+                    Button("添加阅读疑问…") { model.openQuestionEditor() }
+                    Button("收录术语或符号…") { model.openTermEditor() }
+                    Button("固定到参考页") { model.pinSelection() }
+                    Button("写选段笔记…") { model.openNoteEditor() }
+                } label: { Image(systemName: "ellipsis.circle").font(.system(size: 13)) }.menuStyle(.borderlessButton).fixedSize().help("选区操作")
+            }
+        }.padding(10).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 9))
             .overlay { RoundedRectangle(cornerRadius: 9).strokeBorder(Color.secondary.opacity(0.18), lineWidth: 0.5) }
             .shadow(color: .black.opacity(0.10), radius: 12, y: 4)
     }
@@ -314,9 +424,13 @@ struct ContentView: View {
     private var sourceHighlights: [ReaderHighlight] {
         let anchors = (model.store?.notes.filter { $0.documentID == model.selectedBookID } ?? []).flatMap(\.anchors) + model.discussions.compactMap(\.anchor)
         var seen = Set<UUID>()
-        return anchors.filter { seen.insert($0.id).inserted }.map {
+        let sourceMarkers = anchors.filter { seen.insert($0.id).inserted }.map {
             ReaderHighlight(id: $0.id, pageIndex: $0.pageIndex, rects: $0.rects,
                             colorHex: $0.imageRelativePath == nil ? "F8CE46" : "3E8A80", isRegion: $0.imageRelativePath != nil)
+        }
+        return sourceMarkers + model.annotations.map {
+            ReaderHighlight(id: $0.id, pageIndex: $0.anchor.pageIndex, rects: $0.anchor.rects,
+                            colorHex: $0.color.hex, isRegion: $0.style == .box, style: $0.style)
         }
     }
 
@@ -356,6 +470,18 @@ struct ContentView: View {
                 WorkbenchCommand(id: "fitPage", title: "PDF 整页显示", subtitle: "Fit page", systemImage: "doc", shortcut: "⌘2") { model.performReader(.fitPage) },
                 WorkbenchCommand(id: "actual", title: "PDF 实际大小", subtitle: "100% Actual size", systemImage: "1.magnifyingglass", shortcut: "⌘0") { model.performReader(.actualSize) },
                 WorkbenchCommand(id: "export", title: "导出本书笔记…", subtitle: "Markdown Export", systemImage: "square.and.arrow.up", shortcut: "⇧⌘E", perform: model.exportNotes)
+            ]
+        }
+        if model.selectedBook != nil {
+            items += [
+                WorkbenchCommand(id: "annotation", title: "为选区添加彩色批注", subtitle: "高亮、下划线、方框 Highlight", systemImage: "highlighter", shortcut: "⇧⌘H") { model.openAnnotationEditor() },
+                WorkbenchCommand(id: "question", title: "添加阅读疑问", subtitle: "保留待理解和待核实的问题 Question", systemImage: "questionmark.circle", shortcut: nil) { model.openQuestionEditor() },
+                WorkbenchCommand(id: "questions", title: "打开疑问队列与续读卡", subtitle: "继续上次阅读 Resume", systemImage: "bookmark", shortcut: nil) { model.openKnowledge(.questions) },
+                WorkbenchCommand(id: "term", title: "收录术语或符号", subtitle: "自己的术语手册 Glossary", systemImage: "character.book.closed", shortcut: nil) { model.openTermEditor() },
+                WorkbenchCommand(id: "terms", title: "打开术语手册", subtitle: "本书术语与符号定义", systemImage: "text.book.closed", shortcut: nil) { model.openKnowledge(.terms) },
+                WorkbenchCommand(id: "basket", title: "选区加入上下文篮", subtitle: "组合多段文字与图表 Context", systemImage: "tray.and.arrow.down", shortcut: "⇧⌘C") { model.addSelectionToContext() },
+                WorkbenchCommand(id: "pin", title: "固定当前参考页", subtitle: "边读正文边对照 Pin", systemImage: "pin", shortcut: "⇧⌘P") { model.pinSelection() },
+                WorkbenchCommand(id: "tags", title: "修订本书标签", subtitle: "编辑标签或请Codex建议 Tags", systemImage: "tag", shortcut: nil) { model.openTagsEditor() }
             ]
         }
         items += AppearanceMode.allCases.map { mode in WorkbenchCommand(id: "theme-" + mode.rawValue, title: "外观：" + mode.title, subtitle: "Theme Appearance", systemImage: mode.symbol, shortcut: nil) { model.appearanceMode = mode } }

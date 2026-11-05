@@ -74,14 +74,17 @@ public struct ChatMessage: Identifiable, Codable, Equatable, Sendable {
     public var body: String
     public var status: Status
     public var createdAt: Date
+    /// Immutable value snapshots of the material attached to this submitted turn.
+    public var contextItems: [ContextItem]?
 
     public init(id: UUID = UUID(), role: Role, body: String = "",
-                status: Status = .completed, createdAt: Date = Date()) {
+                status: Status = .completed, createdAt: Date = Date(), contextItems: [ContextItem]? = nil) {
         self.id = id
         self.role = role
         self.body = body
         self.status = status
         self.createdAt = createdAt
+        self.contextItems = contextItems
     }
 }
 

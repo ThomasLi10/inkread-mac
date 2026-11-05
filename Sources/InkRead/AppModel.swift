@@ -14,6 +14,7 @@ final class AppModel: ObservableObject {
         willSet { if !restoringContext { rememberDraft() } }
         didSet {
             if !restoringContext {
+                lastResponseError = nil
                 rememberDiscussion()
                 prompt = draftKey.flatMap { drafts[$0] } ?? ""
             }
@@ -65,12 +66,43 @@ final class AppModel: ObservableObject {
     @Published var invertPDFInDarkMode = UserDefaults.standard.object(forKey: "invertPDFInDarkMode") as? Bool ?? true {
         didSet { UserDefaults.standard.set(invertPDFInDarkMode, forKey: "invertPDFInDarkMode") }
     }
+    @Published var featureSheet: FeatureSheet?
+    @Published var featureDocumentID: UUID?
+    @Published var featureAnchor: SourceAnchor?
+    @Published var editingAnnotation: ReadingAnnotation?
+    @Published var annotationColor: AnnotationColor = .yellow
+    @Published var annotationStyle: ReadingAnnotation.Style = .highlight
+    @Published var annotationBody = ""
+    @Published var editingQuestion: ReadingQuestion?
+    @Published var questionTitle = ""
+    @Published var questionDetail = ""
+    @Published var questionStatus: QuestionStatus = .open
+    @Published var editingTerm: GlossaryEntry?
+    @Published var termName = ""
+    @Published var termMeaning = ""
+    @Published var termScope = ""
+    @Published var tagsText = ""
+    @Published var suggestedTags: [String] = []
+    @Published var knowledgeSection: KnowledgeSection = .questions
+    @Published var showResumeCard = false
+    @Published var isOrganizing = false
+    @Published var featureStatus = ""
+    @Published var responseStartedAt: Date?
+    @Published var lastResponseError: String?
+    @Published var focusComposerToken = UUID()
+    @Published var replyStyle = ReplyStyle(rawValue: UserDefaults.standard.string(forKey: "replyStyle") ?? "detailed") ?? .detailed {
+        didSet { UserDefaults.standard.set(replyStyle.rawValue, forKey: "replyStyle") }
+    }
+    var featureTask: Task<Void, Never>?
+    var annotationUndoHistory: [UUID: [AnnotationChange]] = [:]
+    var annotationRedoHistory: [UUID: [AnnotationChange]] = [:]
     let codex = CodexClient()
     private var subscriptions = Set<AnyCancellable>()
     private var responseTask: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
     private var activeAssistantID: UUID?
     private var noteAnchor: SourceAnchor?
+    private var noteAnchors: [SourceAnchor] = []
     private var lastCheckpoint = Date.distantPast
     private var activeDiscussionID: UUID?
     private var pendingPage: (UUID, Int)?
@@ -115,7 +147,7 @@ final class AppModel: ObservableObject {
     var notes: [Note] {
         (store?.notes ?? []).filter { $0.documentID == selectedBookID && (noteSearch.isEmpty || $0.title.localizedCaseInsensitiveContains(noteSearch) || $0.body.localizedCaseInsensitiveContains(noteSearch)) }.sorted { $0.updatedAt > $1.updatedAt }
     }
-    var isBusy: Bool { isGenerating || isImporting }
+    var isBusy: Bool { isGenerating || isImporting || isOrganizing }
 
     func applyAppearance() {
         NSApp?.appearance = appearanceMode.appKitAppearance
@@ -199,6 +231,7 @@ final class AppModel: ObservableObject {
         defer { restoringContext = false; rememberDiscussion() }
         activeDocumentID = selectedBookID
         selection = nil
+        lastResponseError = nil
         captureRegion = false
         readerMetrics = nil
         pdfSearchQuery = ""
@@ -216,6 +249,8 @@ final class AppModel: ObservableObject {
         readerJump = ReaderJump(pageIndex: book.currentPage)
         pageNumber = String(book.currentPage + 1)
         navigationTab = 1
+        showResumeCard = book.currentPage > 0 || !questions.isEmpty || !terms.isEmpty
+        featureSheet = nil
         indexingTask?.cancel()
         guard let url = store?.pdfURL(for: book) else { return }
         indexingTask = Task { [weak self] in
@@ -328,7 +363,7 @@ final class AppModel: ObservableObject {
     }
 
     func startDiscussion(useSelection: Bool = true) {
-        guard let book = selectedBook, let store, !isGenerating else { return }
+        guard let book = selectedBook, let store, !isBusy else { return }
         do {
             let anchor = useSelection ? try makeAnchor() : nil
             let title = anchor?.selectedText.map { String($0.prefix(32)).replacingOccurrences(of: "\n", with: " ") }
@@ -340,21 +375,29 @@ final class AppModel: ObservableObject {
             prompt = pendingQuestion
             rightTab = 0
             showInspector = true
+            focusComposerToken = UUID()
         } catch { report(error, prefix: "创建讨论失败") }
     }
 
     func sendMessage() {
         let question = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !question.isEmpty, !isGenerating, let book = selectedBook, let store else { return }
+        guard !question.isEmpty, !isBusy, let book = selectedBook, let store else { return }
         if currentDiscussion == nil { startDiscussion() }
         guard var discussion = currentDiscussion else { return }
-        let user = ChatMessage(role: .user, body: question)
+        let context = effectiveContext(for: discussion)
+        guard context.reduce(0, { $0 + $1.body.count + $1.anchors.reduce(0, { $0 + min(5000, $1.surroundingText?.count ?? 0) }) }) < 100_000 else {
+            lastResponseError = "本次材料过长，请从上下文篮移除部分内容后再发送。"; return
+        }
+        let priorMessages = discussion.codexThreadID == nil ? discussion.messages : []
+        let user = ChatMessage(role: .user, body: question, contextItems: context)
         let assistant = ChatMessage(role: .assistant, body: "", status: .inProgress)
         discussion.messages.append(contentsOf: [user, assistant])
         discussion.updatedAt = Date()
         do { try store.upsert(discussion) } catch { report(error, prefix: "问题保存失败"); return }
         prompt = ""
         isGenerating = true
+        responseStartedAt = Date()
+        lastResponseError = nil
         activeDiscussionID = discussion.id
         lastCheckpoint = .distantPast
         streamingText = ""
@@ -363,17 +406,22 @@ final class AppModel: ObservableObject {
         let discussionID = discussion.id
         let workspace = store.workspaceURL(for: book)
         let input = readingPrompt(question: question, book: book, anchor: discussion.anchor)
-        let imageURL = discussion.anchor?.imageRelativePath.map { store.assetURL(relativePath: $0) }
+            + materialPrompt(context, primaryAnchor: discussion.anchor)
+            + historyPrompt(priorMessages)
+            + "\n回答方式：" + replyStyle.instruction
+        var seenImages = Set<String>()
+        let imageURLs = context.flatMap { $0.anchors.compactMap(\.imageRelativePath) }.filter { seenImages.insert($0).inserted }
+            .map { store.assetURL(relativePath: $0) }
         let previousThreadID = discussion.codexThreadID
         responseTask = Task { [weak self] in
             guard let self else { return }
-            defer { self.isGenerating = false; self.activeAssistantID = nil; self.activeDiscussionID = nil; self.activity = "" }
+            defer { self.isGenerating = false; self.responseStartedAt = nil; self.activeAssistantID = nil; self.activeDiscussionID = nil; self.activity = "" }
             do {
                 if !FileManager.default.fileExists(atPath: workspace.appendingPathComponent("BOOK.md").path) {
                     let source = store.pdfURL(for: book)
                     try await Task.detached { try Self.buildReadingContext(pdfURL: source, workspace: workspace, title: book.title) }.value
                 }
-                let answer = try await self.codex.respond(threadID: previousThreadID, prompt: input, imageURL: imageURL, workspaceURL: workspace,
+                let answer = try await self.codex.respond(threadID: previousThreadID, prompt: input, imageURL: nil, imageURLs: imageURLs, workspaceURL: workspace,
                     onThread: { [weak self] threadID in
                         self?.updateDiscussion(discussionID) { $0.codexThreadID = threadID }
                     }, onDelta: { [weak self] delta in
@@ -399,13 +447,13 @@ final class AppModel: ObservableObject {
                     body: partial.isEmpty ? (wasCancelled ? "已停止生成。" : "此次请求未完成：\(error.localizedDescription)") : partial,
                     status: wasCancelled ? .interrupted : .failed)
                 if !saved { self.unsavedReply = partial; self.unsavedReplyOrigin = "《\(book.title)》 · \(discussion.title)" }
-                if !wasCancelled { self.report(error, prefix: "Codex 请求失败") }
+                if !wasCancelled { self.lastResponseError = error.localizedDescription }
             }
             self.streamingText = ""
         }
     }
 
-    func cancelResponse() { responseTask?.cancel(); codex.cancel() }
+    func cancelResponse() { responseTask?.cancel(); featureTask?.cancel(); codex.cancel() }
     func messageBody(_ message: ChatMessage) -> String {
         message.id == activeAssistantID && !streamingText.isEmpty ? streamingText : message.body
     }
@@ -464,13 +512,19 @@ final class AppModel: ObservableObject {
             else { noteAnchor = try makeAnchor() }
         }
         catch { report(error, prefix: "保存引用失败"); return }
+        if let existing { noteAnchors = existing.anchors }
+        else if let answer, let discussion = currentDiscussion, let index = discussion.messages.firstIndex(where: { $0.id == answer.id }) {
+            let sources = discussion.messages[..<index].last(where: { $0.role == .user })?.contextItems?.flatMap(\.anchors) ?? []
+            var seen = Set<UUID>()
+            noteAnchors = ((noteAnchor.map { [$0] } ?? []) + sources).filter { seen.insert($0.id).inserted }
+        } else { noteAnchors = noteAnchor.map { [$0] } ?? [] }
         noteDiscussionID = existing?.discussionID ?? (answer != nil || noteAnchor?.id == currentDiscussion?.anchor?.id ? currentDiscussion?.id : nil)
         showNoteEditor = true
     }
     func saveNote() {
         guard let store, let ownerID = noteDocumentID, store.books.contains(where: { $0.id == ownerID }),
               !noteBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        var note = editingNote ?? Note(documentID: ownerID, discussionID: noteDiscussionID, title: "", body: "", anchors: noteAnchor.map { [$0] } ?? [])
+        var note = editingNote ?? Note(documentID: ownerID, discussionID: noteDiscussionID, title: "", body: "", anchors: noteAnchors)
         note.title = noteTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "阅读笔记" : noteTitle
         note.body = noteBody
         note.updatedAt = Date()
@@ -517,7 +571,7 @@ final class AppModel: ObservableObject {
         }
     }
     func applyCodexPath() {
-        guard !isGenerating else { return }
+        guard !isBusy else { return }
         codex.shutdown()
         let path = codexPath.trimmingCharacters(in: .whitespacesAndNewlines)
         UserDefaults.standard.set(path, forKey: "codexExecutable")
@@ -531,6 +585,7 @@ final class AppModel: ObservableObject {
             updateMessage(discussionID: discussionID, messageID: messageID, body: streamingText.isEmpty ? "已停止生成。" : streamingText, status: .interrupted)
         }
         responseTask?.cancel()
+        featureTask?.cancel()
         codex.shutdown()
     }
     func report(_ error: Error, prefix: String) { errorMessage = "\(prefix)：\(error.localizedDescription)" }

@@ -74,6 +74,13 @@ struct AgentTranscript {
         return previous.isEmpty ? separator + text : ""
     }
 
+    /// A provider may identify a streamed item's phase only at completion.
+    /// Remove that provisional item before producing the authoritative answer.
+    mutating func remove(id: String) {
+        messages.removeValue(forKey: id)
+        order.removeAll { $0 == id }
+    }
+
     var text: String { order.compactMap { messages[$0] }.filter { !$0.isEmpty }.joined(separator: "\n\n") }
 
     private mutating func begin(_ id: String) -> String {

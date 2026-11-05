@@ -25,6 +25,7 @@ struct ReaderHighlight: Equatable, Identifiable {
     var rects: [PageRect]
     var colorHex: String = "F8CE46"
     var isRegion: Bool = false
+    var style: ReadingAnnotation.Style = .highlight
 }
 
 struct PDFReaderView: NSViewRepresentable {
@@ -39,6 +40,7 @@ struct PDFReaderView: NSViewRepresentable {
     var onMetrics: (ReaderMetrics) -> Void = { _ in }
     var onSearchResults: ([ReaderSearchHit]) -> Void = { _ in }
     var onSearchStatus: (Bool) -> Void = { _ in }
+    var onAnnotationClicked: (UUID) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -81,6 +83,9 @@ struct PDFReaderView: NSViewRepresentable {
         view.onRegionCaptured = { [weak coordinator] selection in
             coordinator?.parent.onSelection(selection)
         }
+        view.onAnnotationClicked = { [weak coordinator] id in
+            coordinator?.parent.onAnnotationClicked(id)
+        }
         if coordinator.lastHighlights != highlights {
             view.setManagedHighlights(highlights)
             coordinator.lastHighlights = highlights
@@ -100,6 +105,8 @@ struct PDFReaderView: NSViewRepresentable {
         coordinator.disconnect()
         nsView.onRegionCaptured = nil
         nsView.onViewportChanged = nil
+        nsView.onAnnotationClicked = nil
+        nsView.stopInteractionMonitoring()
     }
 
     @MainActor
@@ -545,6 +552,9 @@ final class SelectionPDFView: PDFView {
     }
     var onRegionCaptured: ((ReaderSelection) -> Void)?
     var onViewportChanged: (() -> Void)?
+    var onAnnotationClicked: ((UUID) -> Void)? {
+        didSet { updateInteractionMonitoring() }
+    }
     private var startPoint: NSPoint?
     private var dragPage: PDFPage?
     fileprivate var dragRect: NSRect?
@@ -552,6 +562,10 @@ final class SelectionPDFView: PDFView {
     fileprivate var flashedRects: [NSRect] = []
     private var flashTask: Task<Void, Never>?
     private var managedHighlights: [(PDFPage, PDFAnnotation)] = []
+    private var managedAnnotationIDs: [ObjectIdentifier: UUID] = [:]
+    private var interactionMonitor: Any?
+    private var modifierClickMarker: UUID?
+    private var modifierClickStart: NSPoint?
     private var nightReadingEnabled = false
     private lazy var overlay: ReaderOverlayView = {
         let view = ReaderOverlayView()
@@ -573,6 +587,91 @@ final class SelectionPDFView: PDFView {
         backgroundColor = .windowBackgroundColor
         refreshOverlay()
         needsDisplay = true
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateInteractionMonitoring()
+    }
+
+    private func updateInteractionMonitoring() {
+        guard window != nil, onAnnotationClicked != nil else {
+            stopInteractionMonitoring()
+            return
+        }
+        guard interactionMonitor == nil else { return }
+        // Observe, rather than intercept, native left-button selection/link
+        // handling. Editing is available through a marker's context menu or
+        // Option-click, so normal clicks, word selection and drags stay native.
+        interactionMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .rightMouseDown]
+        ) { [weak self] event in
+            guard let self else { return event }
+            return self.handleMarkerEvent(event)
+        }
+    }
+
+    func stopInteractionMonitoring() {
+        if let interactionMonitor { NSEvent.removeMonitor(interactionMonitor) }
+        interactionMonitor = nil
+        modifierClickMarker = nil
+        modifierClickStart = nil
+    }
+
+    /// Native PDF page coordinates drive hit testing at any zoom/rotation.
+    /// A box only claims its border; links always keep their existing behavior.
+    func managedAnnotationID(at point: NSPoint) -> UUID? {
+        guard let page = page(for: point, nearest: false) else { return nil }
+        let pagePoint = convert(point, to: page)
+        if page.annotations.contains(where: { $0.type == "Link" && $0.bounds.contains(pagePoint) }) { return nil }
+        let tolerance = 4 / max(scaleFactor, 0.1)
+        for annotation in page.annotations.reversed() {
+            guard let id = managedAnnotationIDs[ObjectIdentifier(annotation)],
+                  annotation.bounds.insetBy(dx: -tolerance, dy: -tolerance).contains(pagePoint) else { continue }
+            if annotation.type == "Square",
+               annotation.bounds.insetBy(dx: tolerance, dy: tolerance).contains(pagePoint) { continue }
+            return id
+        }
+        return nil
+    }
+
+    private func handleMarkerEvent(_ event: NSEvent) -> NSEvent? {
+        guard event.window === window, !capturesRegion else { return event }
+        let point = convert(event.locationInWindow, from: nil)
+        switch event.type {
+        case .rightMouseDown:
+            guard bounds.contains(point), let id = managedAnnotationID(at: point) else { return event }
+            let menu = (super.menu(for: event)?.copy() as? NSMenu) ?? NSMenu()
+            let edit = NSMenuItem(title: "编辑这条标记…", action: #selector(editManagedAnnotation(_:)), keyEquivalent: "")
+            edit.target = self
+            edit.representedObject = id.uuidString
+            if !menu.items.isEmpty { menu.insertItem(.separator(), at: 0) }
+            menu.insertItem(edit, at: 0)
+            NSMenu.popUpContextMenu(menu, with: event, for: self)
+            return nil
+        case .leftMouseDown:
+            modifierClickMarker = event.modifierFlags.contains(.option) && event.clickCount == 1 && bounds.contains(point)
+                ? managedAnnotationID(at: point) : nil
+            modifierClickStart = modifierClickMarker == nil ? nil : point
+        case .leftMouseDragged:
+            if let start = modifierClickStart, hypot(point.x - start.x, point.y - start.y) > 3 {
+                modifierClickMarker = nil
+            }
+        case .leftMouseUp:
+            if let id = modifierClickMarker, let start = modifierClickStart,
+               event.modifierFlags.contains(.option), hypot(point.x - start.x, point.y - start.y) <= 3 {
+                onAnnotationClicked?(id)
+            }
+            modifierClickMarker = nil
+            modifierClickStart = nil
+        default: break
+        }
+        return event
+    }
+
+    @objc private func editManagedAnnotation(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let id = UUID(uuidString: raw) else { return }
+        onAnnotationClicked?(id)
     }
 
     /// Toggle the original PDFPage renderer's color transform and invalidate its
@@ -681,27 +780,45 @@ final class SelectionPDFView: PDFView {
     func removeManagedHighlights() {
         for (page, annotation) in managedHighlights { page.removeAnnotation(annotation) }
         managedHighlights = []
+        managedAnnotationIDs = [:]
     }
 
     func setManagedHighlights(_ highlights: [ReaderHighlight]) {
         removeManagedHighlights()
         for highlight in highlights {
             guard let page = document?.page(at: highlight.pageIndex) else { continue }
+            let style: ReadingAnnotation.Style = highlight.isRegion ? .box : highlight.style
             let color = NSColor.readerHex(highlight.colorHex)
-                .withAlphaComponent(highlight.isRegion ? 1 : 0.35)
+                .withAlphaComponent(style == .highlight ? 0.35 : 1)
             for rect in highlight.rects where rect.width > 0 && rect.height > 0 {
+                let subtype: PDFAnnotationSubtype
+                switch style {
+                case .highlight: subtype = .highlight
+                case .underline: subtype = .underline
+                case .box: subtype = .square
+                }
                 let annotation = PDFAnnotation(bounds: rect.cgRect,
-                    forType: highlight.isRegion ? .square : .highlight, withProperties: nil)
+                    forType: subtype, withProperties: nil)
                 annotation.color = color
-                if highlight.isRegion {
+                if style == .box {
                     annotation.interiorColor = nil
                     let border = PDFBorder()
                     border.lineWidth = 1.5
                     annotation.border = border
+                } else {
+                    // PDFKit's native markup quads use a Z order relative to
+                    // the annotation origin, preserving each selected text line.
+                    annotation.quadrilateralPoints = [
+                        NSValue(point: NSPoint(x: 0, y: rect.height)),
+                        NSValue(point: NSPoint(x: rect.width, y: rect.height)),
+                        NSValue(point: .zero), NSValue(point: NSPoint(x: rect.width, y: 0))
+                    ]
                 }
                 annotation.userName = "InkRead"
+                annotation.setValue(highlight.id.uuidString, forAnnotationKey: .name)
                 page.addAnnotation(annotation)
                 managedHighlights.append((page, annotation))
+                managedAnnotationIDs[ObjectIdentifier(annotation)] = highlight.id
             }
         }
         needsDisplay = true

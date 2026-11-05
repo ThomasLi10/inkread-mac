@@ -32,7 +32,11 @@ public final class CodexClient: ObservableObject {
         let id = UUID()
         var threadID: String?
         var turnID: String?
+        var awaitingTurnStart = false
+        var queuedTurnEvents: [(method: String, params: [String: Any])] = []
         var transcript = AgentTranscript()
+        var messagePhases: [String: String] = [:]
+        var commentaryText: [String: String] = [:]
         var completion: Result<String, Error>?
         var continuation: CheckedContinuation<String, Error>?
         var timeout: Task<Void, Never>?
@@ -68,7 +72,7 @@ public final class CodexClient: ObservableObject {
     ]
 
     public func respond(
-        threadID: String?, prompt: String, imageURL: URL?, workspaceURL: URL,
+        threadID: String?, prompt: String, imageURL: URL?, imageURLs: [URL] = [], workspaceURL: URL,
         onThread: @escaping (String) -> Void,
         onDelta: @escaping (String) -> Void,
         onActivity: @escaping (String) -> Void
@@ -119,7 +123,11 @@ public final class CodexClient: ObservableObject {
                 try await verifyMCPDisabled(threadID: id)
                 try checkActive(state)
                 var input: [[String: Any]] = [["type": "text", "text": prompt]]
-                if let imageURL { input.append(["type": "localImage", "path": imageURL.standardizedFileURL.path]) }
+                var seenImages = Set<String>()
+                for url in (imageURL.map { [$0] } ?? []) + imageURLs {
+                    let path = url.standardizedFileURL.path
+                    if seenImages.insert(path).inserted { input.append(["type": "localImage", "path": path]) }
+                }
                 state.activity("Codex 正在阅读与思考…")
                 state.timeout = Task { [weak self, weak state] in
                     guard let self else { return }
@@ -127,23 +135,28 @@ public final class CodexClient: ObservableObject {
                     guard !Task.isCancelled, let state, self.run?.id == state.id else { return }
                     self.disconnect(error: CodexBridgeError.timedOut("回答"))
                 }
+                state.awaitingTurnStart = true
                 let turnResponse = try await request("turn/start", params: [
                     "threadId": id, "input": input,
                     "cwd": workspaceURL.standardizedFileURL.path,
                     "approvalPolicy": "never",
                     "sandboxPolicy": ["type": "readOnly", "networkAccess": false]
                 ])
-                if let turn = turnResponse["turn"] as? [String: Any] {
-                    if let turnID = turn["id"] as? String {
-                        if let received = state.turnID, received != turnID {
-                            throw CodexBridgeError.protocolFailure("回答的 turn.id 不一致")
-                        }
-                        state.turnID = turnID
-                    }
-                    if ["completed", "failed", "interrupted"].contains(turn["status"] as? String ?? "") {
-                        finish(turn: turn, state: state)
-                    }
-                } else { throw CodexBridgeError.protocolFailure("turn/start 缺少 turn") }
+                try checkActive(state)
+                guard let turn = turnResponse["turn"] as? [String: Any],
+                      let turnID = turn["id"] as? String, !turnID.isEmpty else {
+                    throw CodexBridgeError.protocolFailure("turn/start 缺少 turn.id")
+                }
+                // Only the RPC response identifies this submitted turn. Resuming
+                // a thread may replay an older turn's notifications beforehand.
+                state.turnID = turnID
+                state.awaitingTurnStart = false
+                let queued = state.queuedTurnEvents
+                state.queuedTurnEvents.removeAll()
+                for event in queued { receiveTurnNotification(event.method, params: event.params, state: state) }
+                if ["completed", "failed", "interrupted"].contains(turn["status"] as? String ?? "") {
+                    finish(turn: turn, state: state)
+                }
                 let answer: String = try await withCheckedThrowingContinuation { continuation in
                     if let completion = state.completion { continuation.resume(with: completion) }
                     else if Task.isCancelled { continuation.resume(throwing: CodexBridgeError.interrupted) }
@@ -316,39 +329,19 @@ public final class CodexClient: ObservableObject {
             guard let state = run, state.completion == nil,
                   let params = message["params"] as? [String: Any],
                   params["threadId"] as? String == state.threadID, state.threadID != nil else { return }
-            if let turnID = params["turnId"] as? String {
-                if let expected = state.turnID, expected != turnID { return }
-                state.turnID = turnID
+            if state.turnID == nil {
+                // Before submission these are resume/history notifications, not
+                // this request's answer. During submission preserve early events
+                // until the authoritative RPC response lets us filter by turn ID.
+                guard state.awaitingTurnStart else { return }
+                guard state.queuedTurnEvents.count < 2048 else {
+                    disconnect(error: CodexBridgeError.protocolFailure("等待 turn/start 时通知过多"))
+                    return
+                }
+                state.queuedTurnEvents.append((method, params))
+                return
             }
-            switch method {
-            case "turn/started":
-                if let turn = params["turn"] as? [String: Any], let id = turn["id"] as? String { state.turnID = id }
-            case "item/agentMessage/delta":
-                if let delta = params["delta"] as? String, let id = params["itemId"] as? String {
-                    state.delta(state.transcript.append(id: id, delta: delta))
-                }
-            case "item/completed":
-                if let item = params["item"] as? [String: Any] { absorb(item, state: state) }
-            case "item/started":
-                let item = params["item"] as? [String: Any]
-                switch item?["type"] as? String {
-                case "webSearch": state.activity("Codex 正在查阅互联网资料…")
-                case "commandExecution": state.activity("Codex 正在只读查阅本书资料…")
-                case "reasoning": state.activity("Codex 正在思考…")
-                default: break
-                }
-            case "turn/completed":
-                if let turn = params["turn"] as? [String: Any] {
-                    if let expected = state.turnID, let id = turn["id"] as? String, id != expected { return }
-                    finish(turn: turn, state: state)
-                }
-            case "error":
-                if params["willRetry"] as? Bool == true { state.activity("Codex 正在尝试恢复连接…") }
-                else if let error = params["error"] as? [String: Any], let text = error["message"] as? String {
-                    complete(state, .failure(CodexBridgeError.server(BridgeRedaction.clean(text))))
-                }
-            default: break
-            }
+            receiveTurnNotification(method, params: params, state: state)
         } else if let id = message["id"] {
             let key = Self.key(id)
             if let error = message["error"] as? [String: Any] {
@@ -358,10 +351,75 @@ public final class CodexClient: ObservableObject {
         }
     }
 
+    private func receiveTurnNotification(_ method: String, params: [String: Any], state: RunState) {
+        guard state.completion == nil, let expected = state.turnID else { return }
+        let identifiers = [params["turnId"] as? String, (params["turn"] as? [String: Any])?["id"] as? String].compactMap { $0 }
+        guard identifiers.allSatisfy({ $0 == expected }) else { return }
+        switch method {
+            case "turn/started": break
+            case "item/agentMessage/delta":
+                if let delta = params["delta"] as? String, let id = params["itemId"] as? String {
+                    if state.messagePhases[id] == "commentary" {
+                        state.commentaryText[id, default: ""] += delta
+                        publishCommentary(state.commentaryText[id] ?? "", state: state)
+                    } else {
+                        state.delta(state.transcript.append(id: id, delta: delta))
+                    }
+                }
+            case "item/completed":
+                if let item = params["item"] as? [String: Any] { absorb(item, state: state) }
+            case "item/started":
+                let item = params["item"] as? [String: Any]
+                switch item?["type"] as? String {
+                case "agentMessage":
+                    if let item, registerPhase(item, state: state), let id = item["id"] as? String {
+                        state.transcript.remove(id: id)
+                        let text = item["text"] as? String ?? ""
+                        if !text.isEmpty { state.commentaryText[id] = text }
+                        publishCommentary(text, state: state)
+                    }
+                case "webSearch": state.activity("Codex 正在查阅互联网资料…")
+                case "commandExecution": state.activity("Codex 正在只读查阅本书资料…")
+                case "reasoning": state.activity("Codex 正在思考…")
+                default: break
+                }
+            case "turn/completed":
+                if let turn = params["turn"] as? [String: Any] {
+                    finish(turn: turn, state: state)
+                }
+            case "error":
+                if params["willRetry"] as? Bool == true { state.activity("Codex 正在尝试恢复连接…") }
+                else if let error = params["error"] as? [String: Any], let text = error["message"] as? String {
+                    complete(state, .failure(CodexBridgeError.server(BridgeRedaction.clean(text))))
+                }
+            default: break
+        }
+    }
+
     private func absorb(_ item: [String: Any], state: RunState) {
-        guard item["type"] as? String == "agentMessage", let id = item["id"] as? String, let text = item["text"] as? String else { return }
+        guard item["type"] as? String == "agentMessage", let id = item["id"] as? String else { return }
+        if registerPhase(item, state: state) {
+            state.transcript.remove(id: id)
+            if let text = item["text"] as? String { state.commentaryText[id] = text }
+            publishCommentary(state.commentaryText[id] ?? "", state: state)
+            return
+        }
+        guard let text = item["text"] as? String else { return }
         let suffix = state.transcript.complete(id: id, text: text)
         if !suffix.isEmpty { state.delta(suffix) }
+    }
+
+    /// Only an explicit commentary phase is excluded. Nil and unknown values
+    /// preserve legacy behavior; omitted completion phases retain a known phase.
+    private func registerPhase(_ item: [String: Any], state: RunState) -> Bool {
+        guard let id = item["id"] as? String else { return false }
+        if let phase = item["phase"] as? String { state.messagePhases[id] = phase }
+        return state.messagePhases[id] == "commentary"
+    }
+
+    private func publishCommentary(_ text: String, state: RunState) {
+        let compact = text.components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
+        state.activity(compact.isEmpty ? "Codex 正在组织回答…" : BridgeRedaction.clean(compact, limit: 180))
     }
 
     private func finish(turn: [String: Any], state: RunState) {

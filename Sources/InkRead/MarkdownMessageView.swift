@@ -46,6 +46,12 @@ struct MarkdownMessageView: View {
     }
 
     private func inline(_ value: String) -> Text {
+        Text(InspectorInlineMarkdown.attributed(value))
+    }
+}
+
+private enum InspectorInlineMarkdown {
+    static func attributed(_ value: String) -> AttributedString {
         var attributed = (try? AttributedString(markdown: value,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(value)
         for run in attributed.runs where run.inlinePresentationIntent?.contains(.code) == true {
@@ -71,7 +77,7 @@ struct MarkdownMessageView: View {
                 if !isLiteralOrLinked { attributed[range].link = URL(string: "inkread-page://\(page)") }
             }
         }
-        return Text(attributed)
+        return attributed
     }
 }
 
@@ -149,8 +155,7 @@ private struct InspectorMarkdownTable: View {
     }
 
     private func cell(_ value: String, column: Int, width: CGFloat, heading: Bool) -> some View {
-        let attributed = (try? AttributedString(markdown: value,
-            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(value)
+        let attributed = InspectorInlineMarkdown.attributed(value)
         let alignment: Alignment = table.alignments[column] == .center ? .center : table.alignments[column] == .trailing ? .trailing : .leading
         return Text(attributed).font(.system(size: 12, weight: heading ? .semibold : .regular))
             .lineSpacing(3).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)

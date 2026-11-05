@@ -6,7 +6,7 @@ import InkReadCore
 /// through AppModel; choosing another passage never changes a thread implicitly.
 struct ResearchInspector: View {
     @ObservedObject var model: AppModel
-    @State private var historyExpanded = true
+    @State private var historyExpanded = false
     @State private var historyQuery = ""
     @State private var sourceExpanded = false
     @State private var expandedNoteIDs = Set<UUID>()
@@ -14,6 +14,7 @@ struct ResearchInspector: View {
     @State private var followsLatest = true
     @State private var lastScrollOffset: CGFloat = 0
     @State private var composerWidth: CGFloat = 320
+    @State private var availableHeight: CGFloat = 800
     @FocusState private var promptFocused: Bool
 
     private let conversationSpace = "InkReadResearchConversation"
@@ -29,14 +30,20 @@ struct ResearchInspector: View {
                     activeContext(discussion)
                     separator
                 }
-                conversation
+                conversation.frame(minHeight: availableHeight < 740 ? 100 : 140)
                 composer
-            } else {
+            } else if model.rightTab == 1 {
                 notes
+            } else {
+                KnowledgePanel(model: model)
             }
             connectionFooter
         }
         .background(Color.paper)
+        .background(GeometryReader { geometry in
+            Color.clear.onAppear { availableHeight = geometry.size.height }
+                .onChange(of: geometry.size.height) { _, height in availableHeight = height }
+        })
         .environment(\.openURL, OpenURLAction { url in
             guard url.scheme == "inkread-page" else { return .systemAction }
             guard let value = url.host, let page = Int(value),
@@ -46,6 +53,10 @@ struct ResearchInspector: View {
         })
         .onChange(of: model.selectedDiscussionID) { _, _ in
             if model.currentDiscussion?.messages.isEmpty == true { promptFocused = true }
+        }
+        .onChange(of: model.focusComposerToken) { _, _ in
+            model.rightTab = 0
+            DispatchQueue.main.async { promptFocused = true }
         }
         .onChange(of: model.selectedBookID) { _, _ in
             historyQuery = ""
@@ -73,9 +84,10 @@ struct ResearchInspector: View {
     }
 
     private var header: some View {
-        HStack(alignment: .center, spacing: 19) {
+        HStack(alignment: .center, spacing: 15) {
             tab("讨论", count: model.discussions.count, value: 0)
             tab("笔记", count: totalNotes, value: 1)
+            tab("整理", count: nil, value: 2)
             Spacer(minLength: 0)
             if model.rightTab == 0 {
                 Button {
@@ -86,27 +98,37 @@ struct ResearchInspector: View {
                 }.buttonStyle(.plain).foregroundStyle(.secondary)
                     .disabled(model.selectedBook == nil || model.isBusy)
                     .help("创建关于本书的新讨论")
-            } else {
+            } else if model.rightTab == 1 {
                 Button { model.openNoteEditor() } label: {
                     Label("写笔记", systemImage: "square.and.pencil").font(.system(size: 11.5, weight: .medium))
-                }.buttonStyle(.plain).foregroundStyle(.secondary).disabled(model.selectedBook == nil)
+                }.buttonStyle(.plain).foregroundStyle(.secondary).disabled(model.selectedBook == nil || model.isBusy)
+            } else {
+                Menu {
+                    Button("新增疑问") { model.openQuestionEditor() }
+                    Button("新增术语") { model.openTermEditor() }
+                    Button("固定当前页") { model.pinCurrentPage() }
+                    Divider()
+                    Button("编辑书籍标签") { model.openTagsEditor() }
+                } label: { Image(systemName: "plus").font(.system(size: 12)) }
+                    .menuStyle(.borderlessButton).fixedSize().foregroundStyle(.secondary)
+                    .disabled(model.selectedBook == nil || model.isBusy).help("添加知识记录")
             }
         }
         .padding(.horizontal, 18).frame(height: 47)
     }
 
-    private func tab(_ title: String, count: Int, value: Int) -> some View {
+    private func tab(_ title: String, count: Int?, value: Int) -> some View {
         Button { model.rightTab = value } label: {
             VStack(spacing: 0) {
                 HStack(spacing: 5) {
                     Text(title).font(.system(size: 13, weight: model.rightTab == value ? .semibold : .regular))
-                    Text(String(count)).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary)
+                    if let count { Text(String(count)).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary) }
                 }.frame(maxHeight: .infinity)
                 Rectangle().fill(model.rightTab == value ? Color.accent : .clear).frame(height: 2)
             }
             .foregroundStyle(model.rightTab == value ? Color.primary : .secondary)
             .contentShape(Rectangle())
-        }.buttonStyle(.plain).accessibilityLabel("\(title)，\(count) 项")
+        }.buttonStyle(.plain).accessibilityLabel(count.map { "\(title)，\($0) 项" } ?? title)
     }
 
     private var history: some View {
@@ -162,8 +184,14 @@ struct ResearchInspector: View {
             HStack(spacing: 9) {
                 RoundedRectangle(cornerRadius: 1).fill(selected ? Color.accent : .clear).frame(width: 2, height: 25)
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(discussion.title).font(.system(size: 12, weight: selected ? .medium : .regular))
-                        .foregroundStyle(.primary).lineLimit(1)
+                    HStack(spacing: 5) {
+                        Text(discussion.title).font(.system(size: 12, weight: selected ? .medium : .regular))
+                            .foregroundStyle(.primary).lineLimit(1)
+                        if let status = model.questions.first(where: { $0.discussionID == discussion.id })?.status {
+                            Image(systemName: questionIcon(status)).font(.system(size: 9)).foregroundStyle(.secondary)
+                                .help(questionTitle(status))
+                        }
+                    }
                     HStack(spacing: 7) {
                         Text(discussion.anchor.map { "PDF \($0.pageIndex + 1)" } ?? "本书")
                         Text("·")
@@ -176,18 +204,38 @@ struct ResearchInspector: View {
             .padding(.trailing, 9).padding(.leading, 5).frame(height: 46)
             .background(selected ? Color.accent.opacity(0.07) : .clear, in: RoundedRectangle(cornerRadius: 5))
             .contentShape(Rectangle())
-        }.buttonStyle(.plain).disabled(model.isGenerating)
+        }.buttonStyle(.plain).disabled(model.isBusy)
             .help("打开讨论：\(discussion.title)")
+            .contextMenu {
+                Button("重命名讨论") {
+                    model.selectedDiscussionID = discussion.id
+                    model.renameDiscussion()
+                }.disabled(model.isBusy)
+                Button("加入上下文篮") { model.addDiscussionToContext(discussion) }.disabled(model.isBusy)
+                Button("记为疑问") { model.createQuestionFromDiscussion(discussion) }.disabled(model.isBusy)
+                questionStatusMenu(discussion)
+            }
     }
 
     private func activeContext(_ discussion: Discussion) -> some View {
         VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Text(discussion.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                Spacer(minLength: 0)
+                Menu {
+                    Button("重命名讨论") { model.renameDiscussion() }
+                    Button("整段讨论加入上下文") { model.addDiscussionToContext(discussion) }
+                    Button("记为疑问") { model.createQuestionFromDiscussion(discussion) }
+                    questionStatusMenu(discussion)
+                } label: { Image(systemName: "ellipsis").font(.system(size: 12)) }
+                    .menuStyle(.borderlessButton).fixedSize().foregroundStyle(.secondary).disabled(model.isBusy)
+            }.padding(.horizontal, 18).padding(.top, 10).padding(.bottom, 2)
             if let anchor = discussion.anchor {
                 HStack(spacing: 7) {
                     Button { withAnimation(.easeInOut(duration: 0.14)) { sourceExpanded.toggle() } } label: {
                         HStack(spacing: 6) {
                             Image(systemName: anchor.imageRelativePath == nil ? "text.quote" : "crop")
-                            Text("引文 · PDF \(anchor.pageIndex + 1)").fontWeight(.medium)
+                            Text("讨论引用 · PDF \(anchor.pageIndex + 1)").fontWeight(.medium)
                             Image(systemName: sourceExpanded ? "chevron.up" : "chevron.down").font(.system(size: 8, weight: .semibold))
                         }.font(.system(size: 11))
                     }.buttonStyle(.plain).foregroundStyle(.secondary)
@@ -195,6 +243,11 @@ struct ResearchInspector: View {
                     Button { model.jumpTo(anchor) } label: {
                         Label("回到原文", systemImage: "arrow.up.left").font(.system(size: 10.5))
                     }.buttonStyle(.plain).foregroundStyle(Color.accent)
+                    Menu {
+                        Button("此引用加入上下文") { model.addAnchorToContext(anchor) }
+                        Button("固定为参考位置") { model.pinAnchor(anchor) }
+                    } label: { Image(systemName: "ellipsis").font(.system(size: 11)) }
+                        .menuStyle(.borderlessButton).fixedSize().foregroundStyle(.secondary).disabled(model.isBusy)
                 }.padding(.horizontal, 18).frame(height: 35)
                 if sourceExpanded {
                     ScrollView {
@@ -209,14 +262,31 @@ struct ResearchInspector: View {
                     }.frame(maxHeight: 165)
                 }
             } else {
-                HStack(spacing: 6) {
-                    Image(systemName: "book.closed").font(.system(size: 10))
-                    Text(discussion.title).font(.system(size: 11.5, weight: .medium)).lineLimit(1)
-                    Spacer(minLength: 0)
-                    Text("本书讨论").font(.system(size: 10)).foregroundStyle(.tertiary)
-                }.foregroundStyle(.secondary).padding(.horizontal, 18).frame(height: 35)
+                Text("本书讨论 · 可按需添加材料")
+                    .font(.system(size: 10.5)).foregroundStyle(.tertiary)
+                    .padding(.horizontal, 18).padding(.top, 5).padding(.bottom, 10)
             }
         }
+    }
+
+    private func questionStatusMenu(_ discussion: Discussion) -> some View {
+        Menu("疑问状态") {
+            Button(QuestionStatus.open.title) { model.setQuestionStatus(for: discussion, status: .open) }
+            Button(QuestionStatus.verify.title) { model.setQuestionStatus(for: discussion, status: .verify) }
+            Button(QuestionStatus.resolved.title) { model.setQuestionStatus(for: discussion, status: .resolved) }
+        }.disabled(model.isBusy)
+    }
+
+    private func questionIcon(_ status: QuestionStatus) -> String {
+        switch status {
+        case .open: return "questionmark.circle"
+        case .verify: return "circle.dotted"
+        case .resolved: return "checkmark.circle"
+        }
+    }
+
+    private func questionTitle(_ status: QuestionStatus) -> String {
+        status.title
     }
 
     private var conversation: some View {
@@ -228,6 +298,9 @@ struct ResearchInspector: View {
                     } else {
                         Text(model.selectedBook == nil ? "打开一份 PDF 后开始讨论。" : "输入问题，或选中原文后讨论。")
                             .font(.system(size: 12)).foregroundStyle(.tertiary).padding(.top, 9)
+                    }
+                    if let error = model.lastResponseError, !error.isEmpty, !model.isGenerating {
+                        responseFailure(error)
                     }
                     if let unsaved = model.unsavedReply, !unsaved.isEmpty { unsavedReply(unsaved) }
                     Color.clear.frame(height: 1).id(bottomID)
@@ -315,22 +388,57 @@ struct ResearchInspector: View {
             } else {
                 MarkdownMessageView(text: body)
             }
+            if message.role == .user {
+                SentContextSnapshot(items: message.contextItems, model: model)
+            }
             if !body.isEmpty {
-                HStack(spacing: 15) {
+                HStack(spacing: 13) {
                     Button { copy(body) } label: { Label("复制", systemImage: "doc.on.doc") }
                     if message.role == .assistant && message.status == .completed {
-                        Button { model.openNoteEditor(answer: message) } label: { Label("存为笔记", systemImage: "bookmark") }
+                        Button { model.openNoteEditor(answer: message) } label: { Label("笔记", systemImage: "bookmark") }
+                            .disabled(model.isBusy).help("将这条回答存为笔记")
                     }
-                }.buttonStyle(.plain).font(.system(size: 10.5)).foregroundStyle(.tertiary)
+                    Button { model.addMessageToContext(message) } label: { Label("加入上下文", systemImage: "tray.and.arrow.down") }
+                        .disabled(model.isBusy).help("把这条消息加入待发送的上下文篮")
+                    Button { model.forkDiscussion(through: message) } label: { Label("分支", systemImage: "arrow.triangle.branch") }
+                        .disabled(model.isBusy || message.status == .inProgress).help("从这条消息开启独立讨论，保留原讨论")
+                }.buttonStyle(.plain).font(.system(size: 10.5)).foregroundStyle(.secondary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .contextMenu {
             if !body.isEmpty { Button("复制内容") { copy(body) } }
             if message.role == .assistant && message.status == .completed && !body.isEmpty {
-                Button("存为笔记") { model.openNoteEditor(answer: message) }
+                Button("存为笔记") { model.openNoteEditor(answer: message) }.disabled(model.isBusy)
+            }
+            if !body.isEmpty {
+                Button("加入上下文篮") { model.addMessageToContext(message) }.disabled(model.isBusy)
+                Button("从此处开启分支") { model.forkDiscussion(through: message) }
+                    .disabled(model.isBusy || message.status == .inProgress)
             }
         }
+    }
+
+    private func responseFailure(_ error: String) -> some View {
+        let retryAvailable = model.currentDiscussion?.messages.last.map {
+            $0.role == .assistant && ($0.status == .failed || $0.status == .interrupted)
+        } ?? false
+        return VStack(alignment: .leading, spacing: 8) {
+            Label("本次回答未完成", systemImage: "exclamationmark.circle")
+                .font(.system(size: 11.5, weight: .medium)).foregroundStyle(.secondary)
+            Text(error).font(.system(size: 11.5)).lineSpacing(3).foregroundStyle(.secondary)
+                .lineLimit(4).textSelection(.enabled)
+            HStack {
+                Text(retryAvailable ? "原问题和已有回复已保留。" : "草稿仍保留，可调整后再次发送。")
+                    .font(.system(size: 10)).foregroundStyle(.tertiary)
+                Spacer(minLength: 4)
+                if retryAvailable {
+                    Button("在新分支重试", action: model.retryLastQuestion)
+                        .font(.system(size: 10.5, weight: .medium)).buttonStyle(.plain).foregroundStyle(Color.accent)
+                        .disabled(model.isBusy)
+                }
+            }
+        }.padding(.vertical, 9)
     }
 
     private func unsavedReply(_ body: String) -> some View {
@@ -352,54 +460,89 @@ struct ResearchInspector: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 9) {
+            if model.isGenerating {
+                HStack(alignment: .center, spacing: 7) {
+                    ProgressView().controlSize(.mini)
+                    Text(model.activity.isEmpty ? "Codex 正在运行…" : model.activity)
+                        .font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(2).help(model.activity)
+                    Spacer(minLength: 0)
+                    if let startedAt = model.responseStartedAt {
+                        TimelineView(.periodic(from: Date(), by: 1)) { timeline in
+                            Text(elapsed(since: startedAt, now: timeline.date))
+                                .font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
+                        }
+                    }
+                    Button("停止", action: model.cancelResponse)
+                        .buttonStyle(.plain).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                }.padding(.horizontal, 3).padding(.vertical, 3)
+            }
+            ContextBasketView(model: model, compact: availableHeight < 740)
             if let selection = model.selection {
                 HStack(spacing: 6) {
                     Image(systemName: selection.imageData == nil ? "text.quote" : "crop").font(.system(size: 10))
-                    Text("当前选区 · PDF \(selection.pageIndex + 1)").font(.system(size: 10.5))
+                    Text("选区 · PDF \(selection.pageIndex + 1)").font(.system(size: 10.5))
                     Spacer(minLength: 4)
+                    Button("加入材料", action: model.addSelectionToContext)
+                        .buttonStyle(.plain).font(.system(size: 10.5, weight: .medium)).foregroundStyle(Color.accent)
+                        .disabled(model.isBusy).help("只加入上下文篮，不会自动发送")
                     Button {
                         let draft = model.prompt
                         model.startDiscussion()
                         model.prompt = draft
                         promptFocused = true
-                    } label: { Label("讨论选区", systemImage: "plus.bubble").font(.system(size: 10.5, weight: .medium)) }
+                    } label: { Text("单独讨论").font(.system(size: 10.5)) }
                         .buttonStyle(.plain).foregroundStyle(Color.accent).disabled(model.isBusy)
                         .help("为当前选区新建讨论，保留已有讨论的引用")
+                    Menu {
+                        Button("固定为参考位置", action: model.pinSelection)
+                        Button("写选区笔记") { model.openNoteEditor() }
+                    } label: { Image(systemName: "ellipsis").font(.system(size: 10)) }
+                        .menuStyle(.borderlessButton).fixedSize().foregroundStyle(.secondary).disabled(model.isBusy)
                     Button { model.clearReaderSelection() } label: { Image(systemName: "xmark").font(.system(size: 9)) }
                         .buttonStyle(.plain).foregroundStyle(.tertiary).help("清除当前选区")
                 }.foregroundStyle(.secondary)
             }
+            HStack(spacing: 14) {
+                preset("解释", text: "请解释当前材料的核心含义，指出关键前提，并引用原文页码。")
+                preset("推导", text: "请逐步补全相关公式的推导，说明每一步使用的假设、符号和适用条件。")
+                preset("举例", text: "请用一个具体的小例子说明当前材料，再给出一个容易误用的反例。")
+                preset("检验", text: "请检查这项结论的假设、证据与适用边界，指出还需要核实的地方。")
+                Spacer(minLength: 0)
+            }.padding(.horizontal, 4)
             VStack(spacing: 4) {
                 TextEditor(text: $model.prompt)
                     .font(.system(size: 14)).lineSpacing(3).scrollContentBackground(.hidden)
                     .frame(height: composerHeight)
-                    .focused($promptFocused).disabled(model.isGenerating || model.selectedBook == nil || model.isImporting)
+                    .focused($promptFocused).disabled(model.selectedBook == nil || model.isImporting || model.isOrganizing)
                     .accessibilityLabel("阅读问题")
+                    .onAppear { if !model.prompt.isEmpty || model.currentDiscussion?.messages.isEmpty == true { DispatchQueue.main.async { promptFocused = true } } }
                     .overlay(alignment: .topLeading) {
                         if model.prompt.isEmpty {
-                            Text(model.selectedBook == nil ? "先打开一份 PDF" : "围绕原文继续提问…")
+                            Text(model.selectedBook == nil ? "先打开一份 PDF" : model.isGenerating ? "可以先写下一问，稍后发送…" : "围绕原文继续提问…")
                                 .font(.system(size: 14)).foregroundStyle(.tertiary)
                                 .padding(.leading, 5).padding(.top, 1).allowsHitTesting(false)
                         }
                     }
                 HStack(spacing: 8) {
-                    if model.isGenerating {
-                        ProgressView().controlSize(.mini)
-                        Text(model.activity.isEmpty ? "Codex 正在运行…" : model.activity)
-                            .font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(2)
-                    } else {
-                        Text("⌘ Return").font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
-                    }
+                    Menu {
+                        Picker("回复方式", selection: $model.replyStyle) {
+                            Text(ReplyStyle.concise.title).tag(ReplyStyle.concise)
+                            Text(ReplyStyle.detailed.title).tag(ReplyStyle.detailed)
+                            Text(ReplyStyle.socratic.title).tag(ReplyStyle.socratic)
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(model.replyStyle.title)
+                            Image(systemName: "chevron.down").font(.system(size: 7, weight: .semibold))
+                        }.font(.system(size: 10.5)).foregroundStyle(.secondary)
+                    }.menuStyle(.borderlessButton).fixedSize()
                     Spacer(minLength: 2)
-                    if model.isGenerating {
-                        Button(action: model.cancelResponse) { Label("停止", systemImage: "stop.fill").font(.system(size: 11)) }
-                            .buttonStyle(.bordered).controlSize(.small)
-                    } else {
-                        Button(action: model.sendMessage) { Label("发送", systemImage: "arrow.up").font(.system(size: 11, weight: .medium)) }
-                            .buttonStyle(.borderedProminent).foregroundStyle(Color.onAccent).controlSize(.small).tint(Color.accent)
-                            .keyboardShortcut(.return, modifiers: .command)
-                            .disabled(model.selectedBook == nil || model.isBusy || model.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    }
+                    Text(model.isGenerating ? "下一问草稿" : "⌘ Return")
+                        .font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
+                    Button(action: model.sendMessage) { Label("发送", systemImage: "arrow.up").font(.system(size: 11, weight: .medium)) }
+                        .buttonStyle(.borderedProminent).foregroundStyle(Color.onAccent).controlSize(.small).tint(Color.accent)
+                        .keyboardShortcut(.return, modifiers: .command)
+                        .disabled(model.selectedBook == nil || model.isBusy || model.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }.padding(.horizontal, 4).padding(.bottom, 3)
             }
             .padding(8)
@@ -417,7 +560,23 @@ struct ResearchInspector: View {
         let measured = NSAttributedString(string: text, attributes: [.font: NSFont.systemFont(ofSize: 14)])
             .boundingRect(with: NSSize(width: max(100, composerWidth - 34), height: 10_000),
                           options: [.usesLineFragmentOrigin, .usesFontLeading]).height
-        return min(140, max(40, ceil(measured) + 9))
+        return min(availableHeight < 740 ? 100 : 160, max(40, ceil(measured) + 9))
+    }
+
+    private func preset(_ title: String, text: String) -> some View {
+        Button(title) {
+            model.composerPreset(text)
+            promptFocused = true
+        }
+        .buttonStyle(.plain).font(.system(size: 10.5)).foregroundStyle(.secondary)
+        .disabled(model.selectedBook == nil || model.isImporting || model.isOrganizing)
+        .help("填入提问草稿，不会自动发送")
+    }
+
+    private func elapsed(since start: Date, now: Date) -> String {
+        let seconds = max(0, Int(now.timeIntervalSince(start)))
+        if seconds < 60 { return "\(seconds) 秒" }
+        return "\(seconds / 60) 分 \(String(format: "%02d", seconds % 60)) 秒"
     }
 
     private var notes: some View {
@@ -452,13 +611,14 @@ struct ResearchInspector: View {
             HStack(alignment: .firstTextBaseline, spacing: 9) {
                 Button { model.openNoteEditor(existing: note) } label: {
                     Text(note.title).font(.system(size: 13, weight: .semibold)).multilineTextAlignment(.leading).lineLimit(2)
-                }.buttonStyle(.plain)
+                }.buttonStyle(.plain).disabled(model.isBusy)
                 Spacer(minLength: 0)
                 Menu {
-                    Button("编辑笔记") { model.openNoteEditor(existing: note) }
+                    Button("编辑笔记") { model.openNoteEditor(existing: note) }.disabled(model.isBusy)
                     Button("复制内容") { copy(note.body) }
+                    Button("加入上下文篮") { model.addNoteToContext(note) }.disabled(model.isBusy)
                     Divider()
-                    Button("删除笔记", role: .destructive) { model.deleteNote(note) }
+                    Button("删除笔记", role: .destructive) { model.deleteNote(note) }.disabled(model.isBusy)
                 } label: { Image(systemName: "ellipsis").font(.system(size: 12)) }
                     .menuStyle(.borderlessButton).fixedSize().foregroundStyle(.secondary)
             }
@@ -476,6 +636,7 @@ struct ResearchInspector: View {
             HStack(spacing: 12) {
                 Text(note.updatedAt, format: .dateTime.month(.twoDigits).day(.twoDigits)).font(.system(size: 10)).foregroundStyle(.tertiary)
                 Spacer(minLength: 0)
+                Button("加入上下文") { model.addNoteToContext(note) }.disabled(model.isBusy)
                 Button(expanded ? "收起" : "展开") {
                     if expanded { expandedNoteIDs.remove(note.id) } else { expandedNoteIDs.insert(note.id) }
                 }
@@ -483,9 +644,9 @@ struct ResearchInspector: View {
                     Button("查看讨论") {
                         model.selectedDiscussionID = discussionID
                         model.rightTab = 0
-                    }.disabled(model.isGenerating)
+                    }.disabled(model.isBusy)
                 }
-                Button("编辑") { model.openNoteEditor(existing: note) }
+                Button("编辑") { model.openNoteEditor(existing: note) }.disabled(model.isBusy)
             }.buttonStyle(.plain).font(.system(size: 10.5)).foregroundStyle(.secondary)
         }.padding(.horizontal, 18).padding(.vertical, 17).frame(maxWidth: .infinity, alignment: .leading)
     }
