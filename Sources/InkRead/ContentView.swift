@@ -23,6 +23,10 @@ struct ContentView: View {
                     }
                     reader.frame(maxWidth: .infinity, maxHeight: .infinity)
                         .layoutPriority(1)
+                        .popover(isPresented: Binding(get: { !CommandLine.arguments.contains("--smoke-test") && model.showTranslation },
+                            set: { if !$0 { model.closeTranslation() } }), arrowEdge: .trailing) {
+                            TranslationPopover(model: model)
+                        }
                     if model.showInspector {
                         PaneDivider(width: $inspectorWidth, limits: 330...max(330, min(560, geometry.size.width - (model.showNavigation ? navigationWidth : 0) - 430)), reversed: true)
                         ResearchInspector(model: model).frame(width: inspectorWidth)
@@ -67,15 +71,15 @@ struct ContentView: View {
         }
         ToolbarItem(placement: .principal) {
             HStack(spacing: 8) {
-                Image(systemName: "book.closed").foregroundStyle(Color.accent).font(.system(size: 12))
-                Text(model.selectedBook?.title ?? "墨读 InkRead").font(.system(size: 12, weight: .medium)).lineLimit(1)
+                Image(systemName: "book.closed").foregroundStyle(Color.accent).font(.system(size: 13))
+                Text(model.selectedBook?.title ?? "墨读 InkRead").font(.system(size: 13, weight: .medium)).lineLimit(1)
             }.frame(maxWidth: 460)
         }
         ToolbarItemGroup(placement: .primaryAction) {
             Button { model.openPDFSearch() } label: { Image(systemName: "magnifyingglass") }
                 .help("查找 PDF 原文  ⌘F").disabled(model.selectedBook == nil)
             Button { model.showCommandPalette.toggle() } label: {
-                HStack(spacing: 5) { Image(systemName: "command"); Text("K").font(.system(size: 11, design: .monospaced)) }
+                HStack(spacing: 5) { Image(systemName: "command"); Text("K").font(.system(size: 12, design: .monospaced)) }
             }.help("命令面板  ⌘K").accessibilityLabel("命令面板")
             Menu {
                 Picker("应用外观", selection: $model.appearanceMode) {
@@ -121,7 +125,7 @@ struct ContentView: View {
     private func navigationTab(_ title: String, icon: String, index: Int) -> some View {
         Button { model.navigationTab = index; if index == 2 { searchFocused = true } } label: {
             VStack(spacing: 0) {
-                HStack(spacing: 5) { Image(systemName: icon).font(.system(size: 11)); Text(title).font(.system(size: 12, weight: model.navigationTab == index ? .semibold : .regular)) }
+                HStack(spacing: 5) { Image(systemName: icon).font(.system(size: 12)); Text(title).font(.system(size: 13, weight: model.navigationTab == index ? .semibold : .regular)) }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 Rectangle().fill(model.navigationTab == index ? Color.accent : .clear).frame(height: 2)
             }.foregroundStyle(model.navigationTab == index ? Color.primary : .secondary).contentShape(Rectangle())
@@ -139,12 +143,12 @@ struct ContentView: View {
                                 Image(systemName: "doc.richtext").font(.system(size: 23, weight: .light)).foregroundStyle(Color.accent)
                                     .frame(width: 30, height: 40)
                                 VStack(alignment: .leading, spacing: 7) {
-                                    Text(book.title).font(.system(size: 12, weight: .medium)).lineLimit(3).multilineTextAlignment(.leading)
+                                    Text(book.title).font(.system(size: 13, weight: .medium)).lineLimit(3).multilineTextAlignment(.leading)
                                     HStack(spacing: 6) {
-                                        Text("\(book.currentPage + 1) / \(book.pageCount)").font(.system(size: 10, design: .monospaced))
-                                        Text("页").font(.system(size: 10))
+                                        Text("\(book.currentPage + 1) / \(book.pageCount)").font(.system(size: 11, design: .monospaced))
+                                        Text("页").font(.system(size: 11))
                                     }.foregroundStyle(.secondary)
-                                    if !book.tags.isEmpty { Text(book.tags.map { "#" + $0 }.joined(separator: " ")).font(.system(size: 10)).foregroundStyle(Color.accent).lineLimit(2) }
+                                    if !book.tags.isEmpty { Text(book.tags.map { "#" + $0 }.joined(separator: " ")).font(.system(size: 11)).foregroundStyle(Color.accent).lineLimit(2) }
                                     GeometryReader { g in
                                         Capsule().fill(Color.secondary.opacity(0.13)).overlay(alignment: .leading) {
                                             Capsule().fill(Color.accent.opacity(0.65)).frame(width: max(2, g.size.width * Double(book.currentPage + 1) / Double(max(1, book.pageCount))))
@@ -164,14 +168,14 @@ struct ContentView: View {
                             }
                     }
                     if model.books.isEmpty {
-                        Text(model.librarySearch.isEmpty ? "将 PDF 拖到这里" : "没有匹配的书籍").font(.system(size: 12)).foregroundStyle(.tertiary).padding(.vertical, 36)
+                        Text(model.librarySearch.isEmpty ? "将 PDF 拖到这里" : "没有匹配的书籍").font(.system(size: 13)).foregroundStyle(.tertiary).padding(.vertical, 36)
                     }
                 }.padding(.horizontal, 8)
             }
             WorkbenchHairline()
             Button(action: model.choosePDFs) {
-                HStack { Image(systemName: "plus"); Text("导入 PDF"); Spacer(); Text("⌘O").font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary) }
-                    .font(.system(size: 12)).padding(14).contentShape(Rectangle())
+                HStack { Image(systemName: "plus"); Text("导入 PDF"); Spacer(); Text("⌘O").font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary) }
+                    .font(.system(size: 13)).padding(14).contentShape(Rectangle())
             }.buttonStyle(.plain).disabled(model.isBusy)
         }
     }
@@ -179,14 +183,14 @@ struct ContentView: View {
     private var outline: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("CONTENTS").font(.system(size: 9, weight: .semibold, design: .monospaced)).tracking(1.5)
+                Text("CONTENTS").font(.system(size: 10, weight: .semibold, design: .monospaced)).tracking(1.5)
                 Spacer()
-                Text("\(model.outline.count)").font(.system(size: 10, design: .monospaced))
+                Text("\(model.outline.count)").font(.system(size: 11, design: .monospaced))
             }.foregroundStyle(.tertiary).padding(.horizontal, 16).padding(.vertical, 15)
             if model.outline.isEmpty {
                 VStack(alignment: .leading, spacing: 9) {
-                    Text("此 PDF 没有内置目录").font(.system(size: 12)).foregroundStyle(.secondary)
-                    Button("查找原文") { model.openPDFSearch() }.buttonStyle(.link).font(.system(size: 12))
+                    Text("此 PDF 没有内置目录").font(.system(size: 13)).foregroundStyle(.secondary)
+                    Button("查找原文") { model.openPDFSearch() }.buttonStyle(.link).font(.system(size: 13))
                 }.padding(.horizontal, 16)
                 Spacer()
             } else {
@@ -196,9 +200,9 @@ struct ContentView: View {
                             ForEach(model.outline) { item in
                                 Button { model.navigate(to: item.pageIndex) } label: {
                                     HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                        Text(item.title).font(.system(size: 12, weight: item.depth == 0 ? .medium : .regular)).lineLimit(3)
+                                        Text(item.title).font(.system(size: 13, weight: item.depth == 0 ? .medium : .regular)).lineLimit(3)
                                         Spacer(minLength: 3)
-                                        Text("\(item.pageIndex + 1)").font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
+                                        Text("\(item.pageIndex + 1)").font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary)
                                     }.padding(.leading, 10 + CGFloat(min(item.depth, 3)) * 11).padding(.trailing, 10).padding(.vertical, 9)
                                         .foregroundStyle(model.currentChapter?.id == item.id ? Color.accent : Color.primary)
                                         .background(model.currentChapter?.id == item.id ? Color.accent.opacity(0.10) : .clear, in: RoundedRectangle(cornerRadius: 5))
@@ -222,10 +226,10 @@ struct ContentView: View {
                 if !model.pdfSearchQuery.isEmpty {
                     Button { model.pdfSearchQuery = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary) }.buttonStyle(.plain).help("清除原文查找")
                 }
-            }.font(.system(size: 12)).padding(9).background(Color.paper.opacity(0.7), in: RoundedRectangle(cornerRadius: 6)).padding(12)
+            }.font(.system(size: 13)).padding(9).background(Color.paper.opacity(0.7), in: RoundedRectangle(cornerRadius: 6)).padding(12)
             if !model.pdfSearchQuery.isEmpty {
                 HStack {
-                    Text(model.pdfSearching ? "查找中 · \(model.pdfSearchHits.count) 处" : model.pdfSearchHits.count >= 200 ? "前 200 处匹配" : "\(model.pdfSearchHits.count) 处匹配").font(.system(size: 10.5)).foregroundStyle(.secondary)
+                    Text(model.pdfSearching ? "查找中 · \(model.pdfSearchHits.count) 处" : model.pdfSearchHits.count >= 200 ? "前 200 处匹配" : "\(model.pdfSearchHits.count) 处匹配").font(.system(size: 11.5)).foregroundStyle(.secondary)
                     Spacer()
                     WorkbenchIcon("上一处匹配", symbol: "chevron.up") { model.performReader(.previousMatch) }
                     WorkbenchIcon("下一处匹配", symbol: "chevron.down") { model.performReader(.nextMatch) }
@@ -237,14 +241,14 @@ struct ContentView: View {
                     ForEach(model.pdfSearchHits) { hit in
                         Button { model.readerJump = ReaderJump(pageIndex: hit.pageIndex, rects: hit.rects) } label: {
                             VStack(alignment: .leading, spacing: 6) {
-                                Text("PDF · \(hit.pageIndex + 1)").font(.system(size: 10, weight: .medium, design: .monospaced)).foregroundStyle(Color.accent)
-                                Text(hit.text).font(.system(size: 11.5)).lineSpacing(3).lineLimit(4).foregroundStyle(.secondary)
+                                Text("PDF · \(hit.pageIndex + 1)").font(.system(size: 11, weight: .medium, design: .monospaced)).foregroundStyle(Color.accent)
+                                Text(hit.text).font(.system(size: 12.5)).lineSpacing(3).lineLimit(4).foregroundStyle(.secondary)
                             }.padding(13).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                         }.buttonStyle(.plain)
                         WorkbenchHairline().padding(.horizontal, 13)
                     }
                     if model.pdfSearchQuery.isEmpty {
-                        Text("在本书原文中查找\n⌘G 跳到下一处匹配").font(.system(size: 12)).lineSpacing(6).foregroundStyle(.tertiary).padding(16)
+                        Text("在本书原文中查找\n⌘G 跳到下一处匹配").font(.system(size: 13)).lineSpacing(6).foregroundStyle(.tertiary).padding(16)
                     }
                 }
             }
@@ -259,10 +263,10 @@ struct ContentView: View {
                 if model.showResumeCard {
                     HStack(spacing: 8) {
                         Image(systemName: "bookmark").foregroundStyle(Color.accent)
-                        Text("继续阅读 · PDF \(model.pageNumber)").font(.system(size: 11, weight: .medium))
-                        if !model.unresolvedQuestions.isEmpty { Text("\(model.unresolvedQuestions.count) 个待解决疑问").font(.system(size: 10.5)).foregroundStyle(.secondary) }
+                        Text("继续阅读 · PDF \(model.pageNumber)").font(.system(size: 12, weight: .medium))
+                        if !model.unresolvedQuestions.isEmpty { Text("\(model.unresolvedQuestions.count) 个待解决疑问").font(.system(size: 11.5)).foregroundStyle(.secondary) }
                         Spacer(minLength: 0)
-                        Button("续读卡") { resumePopover = true }.font(.system(size: 10.5)).buttonStyle(.plain).foregroundStyle(Color.accent)
+                        Button("续读卡") { resumePopover = true }.font(.system(size: 11.5)).buttonStyle(.plain).foregroundStyle(Color.accent)
                             .popover(isPresented: $resumePopover) { ResumePopover(model: model).frame(width: 330).padding(18) }
                         WorkbenchIcon("收起续读提示", symbol: "xmark") { model.showResumeCard = false }
                     }.padding(.horizontal, 12).frame(height: 31).background(Color.accent.opacity(0.04))
@@ -298,7 +302,7 @@ struct ContentView: View {
                 }
                 Button(action: model.choosePDFs) { Label("导入 PDF", systemImage: "plus").padding(.horizontal, 9).padding(.vertical, 4) }
                     .buttonStyle(.borderedProminent).foregroundStyle(Color.onAccent).disabled(model.isBusy)
-                Text("也可将文件拖入窗口  ·  ⌘O 导入  ·  ⌘K 命令").font(.system(size: 11)).foregroundStyle(.tertiary)
+                Text("也可将文件拖入窗口  ·  ⌘O 导入  ·  ⌘K 命令").font(.system(size: 12)).foregroundStyle(.tertiary)
             }.frame(maxWidth: .infinity, maxHeight: .infinity).background(Color.workbenchCanvas)
         }
     }
@@ -311,7 +315,7 @@ struct ContentView: View {
                           onMetrics: { model.readerMetrics = $0 }, onSearchResults: { model.pdfSearchHits = $0 }, onSearchStatus: { model.pdfSearching = $0 },
                           onAnnotationClicked: { id in if let item = model.annotations.first(where: { $0.id == id }) { model.openAnnotationEditor(existing: item) } }).id(book.id)
             if model.captureRegion {
-                VStack { Label("拖动框选图表或公式", systemImage: "cursorarrow.square").font(.system(size: 12)).padding(.horizontal, 13).padding(.vertical, 9)
+                VStack { Label("拖动框选图表或公式", systemImage: "cursorarrow.square").font(.system(size: 13)).padding(.horizontal, 13).padding(.vertical, 9)
                         .background(.regularMaterial, in: Capsule()).padding(.top, 15); Spacer() }.allowsHitTesting(false)
             }
             if let selection = model.selection { selectionBar(selection).padding(12) }
@@ -331,10 +335,10 @@ struct ContentView: View {
             WorkbenchIcon("前进到下一阅读位置", symbol: "arrow.right", enabled: model.readerMetrics?.canGoForward ?? false) { model.performReader(.forward) }
             Rectangle().fill(Color.secondary.opacity(0.18)).frame(width: 1, height: 14).padding(.horizontal, 4)
             WorkbenchIcon("上一页  ⌘↑", symbol: "chevron.up") { model.turnPage(-1) }
-            TextField("页码", text: $model.pageNumber).font(.system(size: 11, weight: .medium, design: .monospaced)).textFieldStyle(.plain)
+            TextField("页码", text: $model.pageNumber).font(.system(size: 12, weight: .medium, design: .monospaced)).textFieldStyle(.plain)
                 .multilineTextAlignment(.center).frame(width: 35, height: 23).background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 4)).onSubmit(model.goToPage)
                 .accessibilityLabel("PDF 页码")
-            Text("/ \(book.pageCount)").font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.tertiary).fixedSize()
+            Text("/ \(book.pageCount)").font(.system(size: 11.5, design: .monospaced)).foregroundStyle(.tertiary).fixedSize()
             WorkbenchIcon("下一页  ⌘↓", symbol: "chevron.down") { model.turnPage(1) }
             Spacer(minLength: 3)
             WorkbenchIcon("缩小  ⌘−", symbol: "minus") { model.performReader(.zoomOut) }
@@ -342,7 +346,7 @@ struct ContentView: View {
                 Button("实际大小  100%") { model.performReader(.actualSize) }
                 Button("适合宽度") { model.performReader(.fitWidth) }
                 Button("整页显示") { model.performReader(.fitPage) }
-            } label: { Text(model.zoomLabel).font(.system(size: 10.5, design: .monospaced)).frame(width: 44) }.menuStyle(.borderlessButton).fixedSize().help("阅读缩放")
+            } label: { Text(model.zoomLabel).font(.system(size: 11.5, design: .monospaced)).frame(width: 44) }.menuStyle(.borderlessButton).fixedSize().help("阅读缩放")
             WorkbenchIcon("放大  ⌘+", symbol: "plus") { model.performReader(.zoomIn) }
             Rectangle().fill(Color.secondary.opacity(0.18)).frame(width: 1, height: 14).padding(.horizontal, 4)
             Menu {
@@ -351,7 +355,7 @@ struct ContentView: View {
                 Divider()
                 Button("撤销批注操作", action: model.undoAnnotation).disabled(!model.canUndoAnnotation)
                 Button("重做批注操作", action: model.redoAnnotation).disabled(!model.canRedoAnnotation)
-            } label: { Image(systemName: "highlighter").font(.system(size: 11)) }.menuStyle(.borderlessButton).fixedSize().help("彩色批注")
+            } label: { Image(systemName: "highlighter").font(.system(size: 12)) }.menuStyle(.borderlessButton).fixedSize().help("彩色批注")
             WorkbenchIcon("固定当前参考页", symbol: "pin", active: model.pinnedAnchor != nil) { model.pinSelection() }
             WorkbenchIcon(model.captureRegion ? "取消框选图表" : "框选图表", symbol: "crop", active: model.captureRegion) { model.captureRegion.toggle() }
             WorkbenchIcon(model.focusMode ? "退出专注阅读  ⇧⌘F" : "专注阅读  ⇧⌘F", symbol: model.focusMode ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right", active: model.focusMode) { model.toggleFocusMode() }
@@ -363,11 +367,11 @@ struct ContentView: View {
             Menu {
                 Button("返回上一阅读位置") { model.performReader(.back) }.disabled(model.readerMetrics?.canGoBack != true)
                 Button("前进到下一阅读位置") { model.performReader(.forward) }.disabled(model.readerMetrics?.canGoForward != true)
-            } label: { Image(systemName: "clock.arrow.circlepath").font(.system(size: 11)) }.menuStyle(.borderlessButton).fixedSize().help("阅读位置历史")
+            } label: { Image(systemName: "clock.arrow.circlepath").font(.system(size: 12)) }.menuStyle(.borderlessButton).fixedSize().help("阅读位置历史")
             WorkbenchIcon("上一页  ⌘↑", symbol: "chevron.up") { model.turnPage(-1) }
-            TextField("页码", text: $model.pageNumber).font(.system(size: 11, design: .monospaced)).textFieldStyle(.plain)
+            TextField("页码", text: $model.pageNumber).font(.system(size: 12, design: .monospaced)).textFieldStyle(.plain)
                 .multilineTextAlignment(.center).frame(width: 33, height: 23).background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 4)).onSubmit(model.goToPage).accessibilityLabel("PDF 页码")
-            Text("/ \(book.pageCount)").font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary).fixedSize()
+            Text("/ \(book.pageCount)").font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary).fixedSize()
             WorkbenchIcon("下一页  ⌘↓", symbol: "chevron.down") { model.turnPage(1) }
             Spacer(minLength: 2)
             Menu {
@@ -377,13 +381,13 @@ struct ContentView: View {
                 Button("实际大小 100%") { model.performReader(.actualSize) }
                 Button("适合宽度") { model.performReader(.fitWidth) }
                 Button("整页显示") { model.performReader(.fitPage) }
-            } label: { Text(model.zoomLabel).font(.system(size: 10, design: .monospaced)).frame(width: 43) }.menuStyle(.borderlessButton).fixedSize().help("阅读缩放")
+            } label: { Text(model.zoomLabel).font(.system(size: 11, design: .monospaced)).frame(width: 43) }.menuStyle(.borderlessButton).fixedSize().help("阅读缩放")
             Menu {
                 Button("为选区添加彩色批注…") { model.openAnnotationEditor() }.disabled(model.selection == nil)
                 Button("查看本书批注") { model.openKnowledge(.annotations) }
                 Button("撤销批注", action: model.undoAnnotation).disabled(!model.canUndoAnnotation)
                 Button("重做批注", action: model.redoAnnotation).disabled(!model.canRedoAnnotation)
-            } label: { Image(systemName: "highlighter").font(.system(size: 11)) }.menuStyle(.borderlessButton).fixedSize().help("彩色批注")
+            } label: { Image(systemName: "highlighter").font(.system(size: 12)) }.menuStyle(.borderlessButton).fixedSize().help("彩色批注")
             WorkbenchIcon("固定参考页", symbol: "pin", active: model.pinnedAnchor != nil) { model.pinSelection() }
             WorkbenchIcon(model.captureRegion ? "取消框选图表" : "框选图表", symbol: "crop", active: model.captureRegion) { model.captureRegion.toggle() }
             WorkbenchIcon("切换专注阅读", symbol: "viewfinder", active: model.focusMode) { model.toggleFocusMode() }
@@ -394,14 +398,19 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 9) {
             HStack(spacing: 8) {
                 Image(systemName: selection.imageData == nil ? "text.quote" : "viewfinder").foregroundStyle(Color.accent)
-                Text("\(selection.imageData == nil ? "原文" : "图表") · PDF \(selection.pageIndex + 1)").font(.system(size: 10, weight: .medium, design: .monospaced)).foregroundStyle(.secondary)
-                Text(selection.text.replacingOccurrences(of: "\n", with: " ")).font(.system(size: 11)).lineLimit(1)
+                Text("\(selection.imageData == nil ? "原文" : "图表") · PDF \(selection.pageIndex + 1)").font(.system(size: 11, weight: .medium, design: .monospaced)).foregroundStyle(.secondary)
+                Text(selection.text.replacingOccurrences(of: "\n", with: " ")).font(.system(size: 12)).lineLimit(1)
                 Spacer(minLength: 2)
                 WorkbenchIcon("清除选区", symbol: "xmark") { model.clearReaderSelection() }
             }
             HStack(spacing: 7) {
-                Button { model.startDiscussion() } label: { Text("讨论此处").font(.system(size: 11, weight: .medium)) }
+                Button { model.startDiscussion() } label: { Text("讨论此处").font(.system(size: 12, weight: .medium)) }
                     .buttonStyle(.borderedProminent).foregroundStyle(Color.onAccent).controlSize(.small).disabled(model.isBusy)
+                if selection.imageData == nil {
+                    Button("翻译", action: model.translateSelection)
+                        .font(.system(size: 12, weight: .medium)).buttonStyle(.bordered).controlSize(.small)
+                        .disabled(!model.canTranslateSelection).help("结合当前页语境翻译选中的英文  ⇧⌘T")
+                }
                 WorkbenchIcon("加入上下文篮", symbol: "tray.and.arrow.down") { model.addSelectionToContext() }
                 ForEach(AnnotationColor.allCases, id: \.self) { color in
                     Button { model.quickAnnotate(color) } label: { Circle().fill(Color(annotationColor: color)).frame(width: 13, height: 13).padding(3) }
@@ -414,7 +423,7 @@ struct ContentView: View {
                     Button("收录术语或符号…") { model.openTermEditor() }
                     Button("固定到参考页") { model.pinSelection() }
                     Button("写选段笔记…") { model.openNoteEditor() }
-                } label: { Image(systemName: "ellipsis.circle").font(.system(size: 13)) }.menuStyle(.borderlessButton).fixedSize().help("选区操作")
+                } label: { Image(systemName: "ellipsis.circle").font(.system(size: 14)) }.menuStyle(.borderlessButton).fixedSize().help("选区操作")
             }
         }.padding(10).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 9))
             .overlay { RoundedRectangle(cornerRadius: 9).strokeBorder(Color.secondary.opacity(0.18), lineWidth: 0.5) }
@@ -439,15 +448,15 @@ struct ContentView: View {
             WorkbenchHairline()
             HStack(spacing: 8) {
                 if model.isBusy { ProgressView().controlSize(.mini).scaleEffect(0.7).frame(width: 10, height: 10) }
-                else { Image(systemName: "internaldrive").font(.system(size: 9)).foregroundStyle(.tertiary) }
+                else { Image(systemName: "internaldrive").font(.system(size: 10)).foregroundStyle(.tertiary) }
                 Text(model.isGenerating ? model.activity : model.isImporting ? "建立原文索引…" : model.notice.isEmpty ? "本地书库 · 自动保存" : model.notice)
-                    .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
+                    .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                 Spacer(minLength: 12)
-                if let chapter = model.currentChapter { Text(chapter.title).font(.system(size: 10)).foregroundStyle(.tertiary).lineLimit(1) }
+                if let chapter = model.currentChapter { Text(chapter.title).font(.system(size: 11)).foregroundStyle(.tertiary).lineLimit(1) }
                 if let book = model.selectedBook {
-                    Text("\(model.pageNumber) / \(book.pageCount)").font(.system(size: 9.5, design: .monospaced)).foregroundStyle(.secondary)
+                    Text("\(model.pageNumber) / \(book.pageCount)").font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary)
                 }
-                Button { model.showCommandPalette = true } label: { Text("⌘ K").font(.system(size: 9, design: .monospaced)).foregroundStyle(.tertiary) }.buttonStyle(.plain).help("打开命令面板")
+                Button { model.showCommandPalette = true } label: { Text("⌘ K").font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary) }.buttonStyle(.plain).help("打开命令面板")
             }.padding(.horizontal, 13).frame(height: 24).background(Color.workbenchChrome)
         }
     }
@@ -478,6 +487,7 @@ struct ContentView: View {
                 WorkbenchCommand(id: "question", title: "添加阅读疑问", subtitle: "保留待理解和待核实的问题 Question", systemImage: "questionmark.circle", shortcut: nil) { model.openQuestionEditor() },
                 WorkbenchCommand(id: "questions", title: "打开疑问队列与续读卡", subtitle: "继续上次阅读 Resume", systemImage: "bookmark", shortcut: nil) { model.openKnowledge(.questions) },
                 WorkbenchCommand(id: "term", title: "收录术语或符号", subtitle: "自己的术语手册 Glossary", systemImage: "character.book.closed", shortcut: nil) { model.openTermEditor() },
+                WorkbenchCommand(id: "translate", title: "翻译选中英文", subtitle: "结合原文语境查词 Translate", systemImage: "character.bubble", shortcut: "⇧⌘T") { model.translateSelection() },
                 WorkbenchCommand(id: "terms", title: "打开术语手册", subtitle: "本书术语与符号定义", systemImage: "text.book.closed", shortcut: nil) { model.openKnowledge(.terms) },
                 WorkbenchCommand(id: "basket", title: "选区加入上下文篮", subtitle: "组合多段文字与图表 Context", systemImage: "tray.and.arrow.down", shortcut: "⇧⌘C") { model.addSelectionToContext() },
                 WorkbenchCommand(id: "pin", title: "固定当前参考页", subtitle: "边读正文边对照 Pin", systemImage: "pin", shortcut: "⇧⌘P") { model.pinSelection() },

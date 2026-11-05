@@ -94,13 +94,13 @@ struct ResearchInspector: View {
                     model.startDiscussion(useSelection: false)
                     promptFocused = true
                 } label: {
-                    Label("新讨论", systemImage: "plus").font(.system(size: 11.5, weight: .medium))
+                    Label("新讨论", systemImage: "plus").font(.system(size: 12.5, weight: .medium))
                 }.buttonStyle(.plain).foregroundStyle(.secondary)
                     .disabled(model.selectedBook == nil || model.isBusy)
                     .help("创建关于本书的新讨论")
             } else if model.rightTab == 1 {
                 Button { model.openNoteEditor() } label: {
-                    Label("写笔记", systemImage: "square.and.pencil").font(.system(size: 11.5, weight: .medium))
+                    Label("写笔记", systemImage: "square.and.pencil").font(.system(size: 12.5, weight: .medium))
                 }.buttonStyle(.plain).foregroundStyle(.secondary).disabled(model.selectedBook == nil || model.isBusy)
             } else {
                 Menu {
@@ -109,7 +109,7 @@ struct ResearchInspector: View {
                     Button("固定当前页") { model.pinCurrentPage() }
                     Divider()
                     Button("编辑书籍标签") { model.openTagsEditor() }
-                } label: { Image(systemName: "plus").font(.system(size: 12)) }
+                } label: { Image(systemName: "plus").font(.system(size: 13)) }
                     .menuStyle(.borderlessButton).fixedSize().foregroundStyle(.secondary)
                     .disabled(model.selectedBook == nil || model.isBusy).help("添加知识记录")
             }
@@ -121,8 +121,8 @@ struct ResearchInspector: View {
         Button { model.rightTab = value } label: {
             VStack(spacing: 0) {
                 HStack(spacing: 5) {
-                    Text(title).font(.system(size: 13, weight: model.rightTab == value ? .semibold : .regular))
-                    if let count { Text(String(count)).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary) }
+                    Text(title).font(.system(size: 14, weight: model.rightTab == value ? .semibold : .regular))
+                    if let count { Text(String(count)).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(.secondary) }
                 }.frame(maxHeight: .infinity)
                 Rectangle().fill(model.rightTab == value ? Color.accent : .clear).frame(height: 2)
             }
@@ -136,25 +136,25 @@ struct ResearchInspector: View {
             Button { withAnimation(.easeInOut(duration: 0.14)) { historyExpanded.toggle() } } label: {
                 HStack(spacing: 7) {
                     Image(systemName: historyExpanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 9, weight: .semibold)).frame(width: 9)
-                    Text("讨论记录").font(.system(size: 11.5, weight: .medium))
+                        .font(.system(size: 10, weight: .semibold)).frame(width: 9)
+                    Text("讨论记录").font(.system(size: 12.5, weight: .medium))
                     if !historyExpanded, let title = model.currentDiscussion?.title {
-                        Text(title).font(.system(size: 11)).foregroundStyle(.tertiary).lineLimit(1)
+                        Text(title).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
                     }
                     Spacer(minLength: 0)
-                    Text(String(model.discussions.count)).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.tertiary)
+                    Text(String(model.discussions.count)).font(.system(size: 11.5, design: .monospaced)).foregroundStyle(.tertiary)
                 }.foregroundStyle(.secondary).padding(.horizontal, 18).frame(height: 33).contentShape(Rectangle())
             }.buttonStyle(.plain)
             if historyExpanded {
                 if model.discussions.isEmpty {
-                    Text("尚无讨论").font(.system(size: 11.5)).foregroundStyle(.tertiary)
+                    Text("尚无讨论").font(.system(size: 12.5)).foregroundStyle(.tertiary)
                         .frame(maxWidth: .infinity, alignment: .leading).padding(.leading, 34).padding(.bottom, 12)
                 } else {
                     HStack(spacing: 6) {
-                        Image(systemName: "magnifyingglass").font(.system(size: 10)).foregroundStyle(.tertiary)
-                        TextField("查找讨论", text: $historyQuery).font(.system(size: 11.5)).textFieldStyle(.plain)
+                        Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(.tertiary)
+                        TextField("查找讨论", text: $historyQuery).font(.system(size: 12.5)).textFieldStyle(.plain)
                         if !historyQuery.isEmpty {
-                            Button { historyQuery = "" } label: { Image(systemName: "xmark.circle.fill").font(.system(size: 10)) }
+                            Button { historyQuery = "" } label: { Image(systemName: "xmark.circle.fill").font(.system(size: 11)) }
                                 .buttonStyle(.plain).foregroundStyle(.tertiary).help("清除搜索")
                         }
                     }.padding(.horizontal, 18).padding(.bottom, 7)
@@ -162,7 +162,7 @@ struct ResearchInspector: View {
                         LazyVStack(spacing: 2) {
                             ForEach(historyResults) { discussion in historyRow(discussion) }
                             if historyResults.isEmpty {
-                                Text("没有匹配的讨论").font(.system(size: 11.5)).foregroundStyle(.tertiary)
+                                Text("没有匹配的讨论").font(.system(size: 12.5)).foregroundStyle(.tertiary)
                                     .frame(maxWidth: .infinity, alignment: .leading).padding(12)
                             }
                         }.padding(.horizontal, 9).padding(.bottom, 7)
@@ -185,10 +185,10 @@ struct ResearchInspector: View {
                 RoundedRectangle(cornerRadius: 1).fill(selected ? Color.accent : .clear).frame(width: 2, height: 25)
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 5) {
-                        Text(discussion.title).font(.system(size: 12, weight: selected ? .medium : .regular))
+                        Text(discussion.title).font(.system(size: 13, weight: selected ? .medium : .regular))
                             .foregroundStyle(.primary).lineLimit(1)
                         if let status = model.questions.first(where: { $0.discussionID == discussion.id })?.status {
-                            Image(systemName: questionIcon(status)).font(.system(size: 9)).foregroundStyle(.secondary)
+                            Image(systemName: questionIcon(status)).font(.system(size: 10)).foregroundStyle(.secondary)
                                 .help(questionTitle(status))
                         }
                     }
@@ -198,7 +198,7 @@ struct ResearchInspector: View {
                         Text("\(answers) 条回答")
                         Spacer(minLength: 4)
                         Text(discussion.updatedAt, format: .dateTime.month(.twoDigits).day(.twoDigits).hour().minute())
-                    }.font(.system(size: 10)).foregroundStyle(.tertiary)
+                    }.font(.system(size: 11)).foregroundStyle(.tertiary)
                 }
             }
             .padding(.trailing, 9).padding(.leading, 5).frame(height: 46)
@@ -220,14 +220,14 @@ struct ResearchInspector: View {
     private func activeContext(_ discussion: Discussion) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                Text(discussion.title).font(.system(size: 12, weight: .medium)).lineLimit(1)
+                Text(discussion.title).font(.system(size: 13, weight: .medium)).lineLimit(1)
                 Spacer(minLength: 0)
                 Menu {
                     Button("重命名讨论") { model.renameDiscussion() }
                     Button("整段讨论加入上下文") { model.addDiscussionToContext(discussion) }
                     Button("记为疑问") { model.createQuestionFromDiscussion(discussion) }
                     questionStatusMenu(discussion)
-                } label: { Image(systemName: "ellipsis").font(.system(size: 12)) }
+                } label: { Image(systemName: "ellipsis").font(.system(size: 13)) }
                     .menuStyle(.borderlessButton).fixedSize().foregroundStyle(.secondary).disabled(model.isBusy)
             }.padding(.horizontal, 18).padding(.top, 10).padding(.bottom, 2)
             if let anchor = discussion.anchor {
@@ -237,16 +237,16 @@ struct ResearchInspector: View {
                             Image(systemName: anchor.imageRelativePath == nil ? "text.quote" : "crop")
                             Text("讨论引用 · PDF \(anchor.pageIndex + 1)").fontWeight(.medium)
                             Image(systemName: sourceExpanded ? "chevron.up" : "chevron.down").font(.system(size: 8, weight: .semibold))
-                        }.font(.system(size: 11))
+                        }.font(.system(size: 12))
                     }.buttonStyle(.plain).foregroundStyle(.secondary)
                     Spacer(minLength: 4)
                     Button { model.jumpTo(anchor) } label: {
-                        Label("回到原文", systemImage: "arrow.up.left").font(.system(size: 10.5))
+                        Label("回到原文", systemImage: "arrow.up.left").font(.system(size: 11.5))
                     }.buttonStyle(.plain).foregroundStyle(Color.accent)
                     Menu {
                         Button("此引用加入上下文") { model.addAnchorToContext(anchor) }
                         Button("固定为参考位置") { model.pinAnchor(anchor) }
-                    } label: { Image(systemName: "ellipsis").font(.system(size: 11)) }
+                    } label: { Image(systemName: "ellipsis").font(.system(size: 12)) }
                         .menuStyle(.borderlessButton).fixedSize().foregroundStyle(.secondary).disabled(model.isBusy)
                 }.padding(.horizontal, 18).frame(height: 35)
                 if sourceExpanded {
@@ -256,14 +256,14 @@ struct ResearchInspector: View {
                                 InspectorImagePreview(url: url).frame(maxHeight: 140)
                             }
                             if let quote = anchor.selectedText, !quote.isEmpty {
-                                Text(quote).font(.system(size: 12)).lineSpacing(3).foregroundStyle(.secondary).textSelection(.enabled)
+                                Text(quote).font(.system(size: 13)).lineSpacing(3).foregroundStyle(.secondary).textSelection(.enabled)
                             }
                         }.padding(.horizontal, 18).padding(.bottom, 12)
                     }.frame(maxHeight: 165)
                 }
             } else {
                 Text("本书讨论 · 可按需添加材料")
-                    .font(.system(size: 10.5)).foregroundStyle(.tertiary)
+                    .font(.system(size: 11.5)).foregroundStyle(.tertiary)
                     .padding(.horizontal, 18).padding(.top, 5).padding(.bottom, 10)
             }
         }
@@ -297,7 +297,7 @@ struct ResearchInspector: View {
                         ForEach(discussion.messages) { message in messageRow(message) }
                     } else {
                         Text(model.selectedBook == nil ? "打开一份 PDF 后开始讨论。" : "输入问题，或选中原文后讨论。")
-                            .font(.system(size: 12)).foregroundStyle(.tertiary).padding(.top, 9)
+                            .font(.system(size: 13)).foregroundStyle(.tertiary).padding(.top, 9)
                     }
                     if let error = model.lastResponseError, !error.isEmpty, !model.isGenerating {
                         responseFailure(error)
@@ -342,7 +342,7 @@ struct ResearchInspector: View {
                         followsLatest = true
                         scrollToLatest(proxy, force: true)
                     } label: {
-                        Label("回到最新", systemImage: "arrow.down").font(.system(size: 11, weight: .medium))
+                        Label("回到最新", systemImage: "arrow.down").font(.system(size: 12, weight: .medium))
                             .padding(.horizontal, 11).padding(.vertical, 6)
                             .background(.regularMaterial, in: Capsule())
                             .overlay(Capsule().strokeBorder(Color(nsColor: .separatorColor).opacity(0.6), lineWidth: 0.5))
@@ -367,23 +367,23 @@ struct ResearchInspector: View {
         return VStack(alignment: .leading, spacing: message.role == .user ? 6 : 11) {
             HStack(spacing: 6) {
                 if message.role == .assistant {
-                    Image(systemName: "sparkle").font(.system(size: 10)).foregroundStyle(Color.accent)
+                    Image(systemName: "sparkle").font(.system(size: 11)).foregroundStyle(Color.accent)
                 }
                 Text(message.role == .user ? "我" : "Codex")
-                    .font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
-                Text(message.createdAt, format: .dateTime.hour().minute()).font(.system(size: 10)).foregroundStyle(.tertiary)
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+                Text(message.createdAt, format: .dateTime.hour().minute()).font(.system(size: 11)).foregroundStyle(.tertiary)
                 Spacer()
                 if message.status == .failed || message.status == .interrupted {
-                    Text(message.status == .failed ? "未完成" : "已停止").font(.system(size: 10)).foregroundStyle(.secondary)
+                    Text(message.status == .failed ? "未完成" : "已停止").font(.system(size: 11)).foregroundStyle(.secondary)
                 }
             }
             if body.isEmpty && message.status == .inProgress {
                 HStack(spacing: 7) {
                     ProgressView().controlSize(.mini)
-                    Text("正在准备回答…").font(.system(size: 12)).foregroundStyle(.tertiary)
+                    Text("正在准备回答…").font(.system(size: 13)).foregroundStyle(.tertiary)
                 }
             } else if message.role == .user {
-                Text(body).font(.system(size: 13.5)).lineSpacing(3).textSelection(.enabled)
+                Text(body).font(.system(size: 14.5)).lineSpacing(3).textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 MarkdownMessageView(text: body)
@@ -402,7 +402,7 @@ struct ResearchInspector: View {
                         .disabled(model.isBusy).help("把这条消息加入待发送的上下文篮")
                     Button { model.forkDiscussion(through: message) } label: { Label("分支", systemImage: "arrow.triangle.branch") }
                         .disabled(model.isBusy || message.status == .inProgress).help("从这条消息开启独立讨论，保留原讨论")
-                }.buttonStyle(.plain).font(.system(size: 10.5)).foregroundStyle(.secondary)
+                }.buttonStyle(.plain).font(.system(size: 11.5)).foregroundStyle(.secondary)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -425,16 +425,16 @@ struct ResearchInspector: View {
         } ?? false
         return VStack(alignment: .leading, spacing: 8) {
             Label("本次回答未完成", systemImage: "exclamationmark.circle")
-                .font(.system(size: 11.5, weight: .medium)).foregroundStyle(.secondary)
-            Text(error).font(.system(size: 11.5)).lineSpacing(3).foregroundStyle(.secondary)
+                .font(.system(size: 12.5, weight: .medium)).foregroundStyle(.secondary)
+            Text(error).font(.system(size: 12.5)).lineSpacing(3).foregroundStyle(.secondary)
                 .lineLimit(4).textSelection(.enabled)
             HStack {
                 Text(retryAvailable ? "原问题和已有回复已保留。" : "草稿仍保留，可调整后再次发送。")
-                    .font(.system(size: 10)).foregroundStyle(.tertiary)
+                    .font(.system(size: 11)).foregroundStyle(.tertiary)
                 Spacer(minLength: 4)
                 if retryAvailable {
                     Button("在新分支重试", action: model.retryLastQuestion)
-                        .font(.system(size: 10.5, weight: .medium)).buttonStyle(.plain).foregroundStyle(Color.accent)
+                        .font(.system(size: 11.5, weight: .medium)).buttonStyle(.plain).foregroundStyle(Color.accent)
                         .disabled(model.isBusy)
                 }
             }
@@ -449,8 +449,8 @@ struct ResearchInspector: View {
                 Spacer()
                 Button("复制回复") { copy(body) }.foregroundStyle(Color.accent)
                 Button { unsavedExpanded.toggle() } label: { Image(systemName: unsavedExpanded ? "chevron.up" : "chevron.down") }
-            }.font(.system(size: 11)).buttonStyle(.plain)
-            Text(model.unsavedReplyOrigin).font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(2)
+            }.font(.system(size: 12)).buttonStyle(.plain)
+            Text(model.unsavedReplyOrigin).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(2)
             if unsavedExpanded { MarkdownMessageView(text: body) }
         }.padding(.top, 9)
         .environment(\.openURL, OpenURLAction { url in
@@ -464,41 +464,41 @@ struct ResearchInspector: View {
                 HStack(alignment: .center, spacing: 7) {
                     ProgressView().controlSize(.mini)
                     Text(model.activity.isEmpty ? "Codex 正在运行…" : model.activity)
-                        .font(.system(size: 10.5)).foregroundStyle(.secondary).lineLimit(2).help(model.activity)
+                        .font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(2).help(model.activity)
                     Spacer(minLength: 0)
                     if let startedAt = model.responseStartedAt {
                         TimelineView(.periodic(from: Date(), by: 1)) { timeline in
                             Text(elapsed(since: startedAt, now: timeline.date))
-                                .font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
+                                .font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary)
                         }
                     }
                     Button("停止", action: model.cancelResponse)
-                        .buttonStyle(.plain).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
+                        .buttonStyle(.plain).font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary)
                 }.padding(.horizontal, 3).padding(.vertical, 3)
             }
             ContextBasketView(model: model, compact: availableHeight < 740)
             if let selection = model.selection {
                 HStack(spacing: 6) {
-                    Image(systemName: selection.imageData == nil ? "text.quote" : "crop").font(.system(size: 10))
-                    Text("选区 · PDF \(selection.pageIndex + 1)").font(.system(size: 10.5))
+                    Image(systemName: selection.imageData == nil ? "text.quote" : "crop").font(.system(size: 11))
+                    Text("选区 · PDF \(selection.pageIndex + 1)").font(.system(size: 11.5))
                     Spacer(minLength: 4)
                     Button("加入材料", action: model.addSelectionToContext)
-                        .buttonStyle(.plain).font(.system(size: 10.5, weight: .medium)).foregroundStyle(Color.accent)
+                        .buttonStyle(.plain).font(.system(size: 11.5, weight: .medium)).foregroundStyle(Color.accent)
                         .disabled(model.isBusy).help("只加入上下文篮，不会自动发送")
                     Button {
                         let draft = model.prompt
                         model.startDiscussion()
                         model.prompt = draft
                         promptFocused = true
-                    } label: { Text("单独讨论").font(.system(size: 10.5)) }
+                    } label: { Text("单独讨论").font(.system(size: 11.5)) }
                         .buttonStyle(.plain).foregroundStyle(Color.accent).disabled(model.isBusy)
                         .help("为当前选区新建讨论，保留已有讨论的引用")
                     Menu {
                         Button("固定为参考位置", action: model.pinSelection)
                         Button("写选区笔记") { model.openNoteEditor() }
-                    } label: { Image(systemName: "ellipsis").font(.system(size: 10)) }
+                    } label: { Image(systemName: "ellipsis").font(.system(size: 11)) }
                         .menuStyle(.borderlessButton).fixedSize().foregroundStyle(.secondary).disabled(model.isBusy)
-                    Button { model.clearReaderSelection() } label: { Image(systemName: "xmark").font(.system(size: 9)) }
+                    Button { model.clearReaderSelection() } label: { Image(systemName: "xmark").font(.system(size: 10)) }
                         .buttonStyle(.plain).foregroundStyle(.tertiary).help("清除当前选区")
                 }.foregroundStyle(.secondary)
             }
@@ -510,8 +510,9 @@ struct ResearchInspector: View {
                 Spacer(minLength: 0)
             }.padding(.horizontal, 4)
             VStack(spacing: 4) {
+                CodexGenerationControls(model: model).padding(.horizontal, 4)
                 TextEditor(text: $model.prompt)
-                    .font(.system(size: 14)).lineSpacing(3).scrollContentBackground(.hidden)
+                    .font(.system(size: 15)).lineSpacing(3).scrollContentBackground(.hidden)
                     .frame(height: composerHeight)
                     .focused($promptFocused).disabled(model.selectedBook == nil || model.isImporting || model.isOrganizing)
                     .accessibilityLabel("阅读问题")
@@ -519,7 +520,7 @@ struct ResearchInspector: View {
                     .overlay(alignment: .topLeading) {
                         if model.prompt.isEmpty {
                             Text(model.selectedBook == nil ? "先打开一份 PDF" : model.isGenerating ? "可以先写下一问，稍后发送…" : "围绕原文继续提问…")
-                                .font(.system(size: 14)).foregroundStyle(.tertiary)
+                                .font(.system(size: 15)).foregroundStyle(.tertiary)
                                 .padding(.leading, 5).padding(.top, 1).allowsHitTesting(false)
                         }
                     }
@@ -534,12 +535,12 @@ struct ResearchInspector: View {
                         HStack(spacing: 4) {
                             Text(model.replyStyle.title)
                             Image(systemName: "chevron.down").font(.system(size: 7, weight: .semibold))
-                        }.font(.system(size: 10.5)).foregroundStyle(.secondary)
+                        }.font(.system(size: 11.5)).foregroundStyle(.secondary)
                     }.menuStyle(.borderlessButton).fixedSize()
                     Spacer(minLength: 2)
                     Text(model.isGenerating ? "下一问草稿" : "⌘ Return")
-                        .font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
-                    Button(action: model.sendMessage) { Label("发送", systemImage: "arrow.up").font(.system(size: 11, weight: .medium)) }
+                        .font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary)
+                    Button(action: model.sendMessage) { Label("发送", systemImage: "arrow.up").font(.system(size: 12, weight: .medium)) }
                         .buttonStyle(.borderedProminent).foregroundStyle(Color.onAccent).controlSize(.small).tint(Color.accent)
                         .keyboardShortcut(.return, modifiers: .command)
                         .disabled(model.selectedBook == nil || model.isBusy || model.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -557,7 +558,7 @@ struct ResearchInspector: View {
 
     private var composerHeight: CGFloat {
         let text = model.prompt.isEmpty ? " " : model.prompt + " "
-        let measured = NSAttributedString(string: text, attributes: [.font: NSFont.systemFont(ofSize: 14)])
+        let measured = NSAttributedString(string: text, attributes: [.font: NSFont.systemFont(ofSize: 15)])
             .boundingRect(with: NSSize(width: max(100, composerWidth - 34), height: 10_000),
                           options: [.usesLineFragmentOrigin, .usesFontLeading]).height
         return min(availableHeight < 740 ? 100 : 160, max(40, ceil(measured) + 9))
@@ -568,7 +569,7 @@ struct ResearchInspector: View {
             model.composerPreset(text)
             promptFocused = true
         }
-        .buttonStyle(.plain).font(.system(size: 10.5)).foregroundStyle(.secondary)
+        .buttonStyle(.plain).font(.system(size: 11.5)).foregroundStyle(.secondary)
         .disabled(model.selectedBook == nil || model.isImporting || model.isOrganizing)
         .help("填入提问草稿，不会自动发送")
     }
@@ -582,10 +583,10 @@ struct ResearchInspector: View {
     private var notes: some View {
         VStack(spacing: 0) {
             HStack(spacing: 7) {
-                Image(systemName: "magnifyingglass").font(.system(size: 11)).foregroundStyle(.tertiary)
-                TextField("搜索笔记", text: $model.noteSearch).textFieldStyle(.plain).font(.system(size: 12))
+                Image(systemName: "magnifyingglass").font(.system(size: 12)).foregroundStyle(.tertiary)
+                TextField("搜索笔记", text: $model.noteSearch).textFieldStyle(.plain).font(.system(size: 13))
                 if !model.noteSearch.isEmpty {
-                    Button { model.noteSearch = "" } label: { Image(systemName: "xmark.circle.fill").font(.system(size: 10)) }
+                    Button { model.noteSearch = "" } label: { Image(systemName: "xmark.circle.fill").font(.system(size: 11)) }
                         .buttonStyle(.plain).foregroundStyle(.tertiary)
                 }
             }.padding(.horizontal, 18).frame(height: 40)
@@ -594,7 +595,7 @@ struct ResearchInspector: View {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     if model.notes.isEmpty {
                         Text(model.noteSearch.isEmpty ? "尚无笔记。可将回答存为笔记，或直接写下理解。" : "没有匹配的笔记。")
-                            .font(.system(size: 12)).lineSpacing(4).foregroundStyle(.tertiary).padding(19)
+                            .font(.system(size: 13)).lineSpacing(4).foregroundStyle(.tertiary).padding(19)
                     }
                     ForEach(model.notes) { note in
                         noteRow(note)
@@ -610,7 +611,7 @@ struct ResearchInspector: View {
         return VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline, spacing: 9) {
                 Button { model.openNoteEditor(existing: note) } label: {
-                    Text(note.title).font(.system(size: 13, weight: .semibold)).multilineTextAlignment(.leading).lineLimit(2)
+                    Text(note.title).font(.system(size: 14, weight: .semibold)).multilineTextAlignment(.leading).lineLimit(2)
                 }.buttonStyle(.plain).disabled(model.isBusy)
                 Spacer(minLength: 0)
                 Menu {
@@ -619,22 +620,22 @@ struct ResearchInspector: View {
                     Button("加入上下文篮") { model.addNoteToContext(note) }.disabled(model.isBusy)
                     Divider()
                     Button("删除笔记", role: .destructive) { model.deleteNote(note) }.disabled(model.isBusy)
-                } label: { Image(systemName: "ellipsis").font(.system(size: 12)) }
+                } label: { Image(systemName: "ellipsis").font(.system(size: 13)) }
                     .menuStyle(.borderlessButton).fixedSize().foregroundStyle(.secondary)
             }
             if expanded { MarkdownMessageView(text: note.body) }
-            else { Text(note.body).font(.system(size: 12.5)).lineSpacing(4).foregroundStyle(.secondary).lineLimit(4).textSelection(.enabled) }
+            else { Text(note.body).font(.system(size: 13.5)).lineSpacing(4).foregroundStyle(.secondary).lineLimit(4).textSelection(.enabled) }
             if !note.anchors.isEmpty {
                 HStack(spacing: 8) {
-                    Image(systemName: "text.quote").font(.system(size: 10)).foregroundStyle(.tertiary)
+                    Image(systemName: "text.quote").font(.system(size: 11)).foregroundStyle(.tertiary)
                     ForEach(Array(note.anchors.prefix(4))) { anchor in
                         Button("PDF \(anchor.pageIndex + 1)") { model.jumpTo(anchor) }
-                            .font(.system(size: 10.5)).buttonStyle(.plain).foregroundStyle(Color.accent).help("回到原文")
+                            .font(.system(size: 11.5)).buttonStyle(.plain).foregroundStyle(Color.accent).help("回到原文")
                     }
                 }
             }
             HStack(spacing: 12) {
-                Text(note.updatedAt, format: .dateTime.month(.twoDigits).day(.twoDigits)).font(.system(size: 10)).foregroundStyle(.tertiary)
+                Text(note.updatedAt, format: .dateTime.month(.twoDigits).day(.twoDigits)).font(.system(size: 11)).foregroundStyle(.tertiary)
                 Spacer(minLength: 0)
                 Button("加入上下文") { model.addNoteToContext(note) }.disabled(model.isBusy)
                 Button(expanded ? "收起" : "展开") {
@@ -647,7 +648,7 @@ struct ResearchInspector: View {
                     }.disabled(model.isBusy)
                 }
                 Button("编辑") { model.openNoteEditor(existing: note) }.disabled(model.isBusy)
-            }.buttonStyle(.plain).font(.system(size: 10.5)).foregroundStyle(.secondary)
+            }.buttonStyle(.plain).font(.system(size: 11.5)).foregroundStyle(.secondary)
         }.padding(.horizontal, 18).padding(.vertical, 17).frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -655,14 +656,14 @@ struct ResearchInspector: View {
         VStack(spacing: 0) {
             separator
             HStack(spacing: 6) {
-                Image(systemName: "terminal").font(.system(size: 9))
+                Image(systemName: "terminal").font(.system(size: 10))
                 Text(model.codex.connectionStatus == "Codex 已连接" ? "本机 Codex · 已连接" : ["Codex 已断开", "尚未连接 Codex"].contains(model.codex.connectionStatus) ? "本机 Codex · 按需连接" : model.codex.connectionStatus)
                     .lineLimit(1).help(model.codex.connectionStatus)
                 Spacer(minLength: 2)
                 if !model.isGenerating, model.unsavedReply == nil, model.notice == "讨论已自动保存" {
                     Label("已保存", systemImage: "checkmark").lineLimit(1)
                 }
-            }.font(.system(size: 9.5)).foregroundStyle(.tertiary).padding(.horizontal, 15).frame(height: 28)
+            }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 15).frame(height: 28)
         }
     }
 

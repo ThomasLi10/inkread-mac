@@ -32,21 +32,21 @@ struct ContextBasketView: View {
                 Button { expanded.toggle() } label: {
                     HStack(spacing: 6) {
                         Image(systemName: expanded ? "chevron.down" : "chevron.right").font(.system(size: 8, weight: .semibold))
-                        Image(systemName: "tray").font(.system(size: 10.5))
-                        Text("上下文篮").font(.system(size: 11, weight: .medium))
-                        Text(String(model.contextItems.count)).font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
+                        Image(systemName: "tray").font(.system(size: 11.5))
+                        Text("上下文篮").font(.system(size: 12, weight: .medium))
+                        Text(String(model.contextItems.count)).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
                         if basketImageCount > 0 {
                             Label(String(basketImageCount), systemImage: "photo")
-                                .font(.system(size: 9)).foregroundStyle(.tertiary)
+                                .font(.system(size: 10)).foregroundStyle(.tertiary)
                                 .help("篮中材料关联 \(basketImageCount) 张图表")
                         }
                     }.foregroundStyle(.secondary)
                 }.buttonStyle(.plain)
                 Spacer(minLength: 0)
-                Text("下次发送 \(nextSendCount) 项").font(.system(size: 9.5)).foregroundStyle(.tertiary)
+                Text("下次发送 \(nextSendCount) 项").font(.system(size: 11)).foregroundStyle(.secondary)
                 if !model.contextItems.isEmpty {
                     Button("清空") { model.clearContextBasket() }
-                        .font(.system(size: 10)).buttonStyle(.plain).foregroundStyle(.secondary)
+                        .font(.system(size: 11)).buttonStyle(.plain).foregroundStyle(.secondary)
                         .disabled(model.isBusy).help("清空待发送材料，不影响已经发送的消息")
                 }
                 Menu {
@@ -54,14 +54,14 @@ struct ContextBasketView: View {
                     if let discussion = model.currentDiscussion {
                         Button("加入当前讨论") { model.addDiscussionToContext(discussion) }
                     }
-                } label: { Image(systemName: "plus").font(.system(size: 10)) }
+                } label: { Image(systemName: "plus").font(.system(size: 11)) }
                     .menuStyle(.borderlessButton).fixedSize().foregroundStyle(.secondary)
                     .disabled(model.isBusy || model.selectedBook == nil).help("添加待讨论的材料")
             }
             if expanded {
                 if model.contextItems.isEmpty {
                     Text(nextSendCount > 0 ? "篮中暂无附加材料；讨论引用会随下一问发送。" : "把选区、笔记或回答加入这里；添加材料不会自动发送。")
-                        .font(.system(size: 10.5)).lineSpacing(2).foregroundStyle(.tertiary)
+                        .font(.system(size: 11.5)).lineSpacing(2).foregroundStyle(.tertiary)
                 } else {
                     ScrollView {
                         VStack(spacing: 0) {
@@ -71,7 +71,7 @@ struct ContextBasketView: View {
                         }
                     }.frame(height: min(compact ? 68 : 126, CGFloat(model.contextItems.count) * 54))
                     Text("材料会留在篮中，方便下一问继续使用。")
-                        .font(.system(size: 9.5)).foregroundStyle(.tertiary)
+                        .font(.system(size: 10.5)).foregroundStyle(.tertiary)
                 }
             }
         }
@@ -94,21 +94,21 @@ struct SentContextSnapshot: View {
         if let items {
             Button { presented.toggle() } label: {
                 Label("本次材料 \(items.count)", systemImage: "paperclip")
-                    .font(.system(size: 10)).foregroundStyle(.secondary)
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
             .popover(isPresented: $presented, arrowEdge: .leading) {
                 VStack(alignment: .leading, spacing: 11) {
                     HStack {
-                        Text("此次发送的材料").font(.system(size: 13, weight: .semibold))
+                        Text("此次发送的材料").font(.system(size: 14, weight: .semibold))
                         Spacer()
-                        Text("\(items.count) 项").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                        Text("\(items.count) 项").font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary)
                     }
                     Text("以下是发送时保存的快照，与现在的上下文篮独立。")
-                        .font(.system(size: 10.5)).lineSpacing(3).foregroundStyle(.secondary)
+                        .font(.system(size: 11.5)).lineSpacing(3).foregroundStyle(.secondary)
                     if items.isEmpty {
                         Text("这次发送没有附加篮中材料。原讨论引用及已有对话仍由对应讨论保留。")
-                            .font(.system(size: 11.5)).lineSpacing(3).foregroundStyle(.secondary).padding(.vertical, 8)
+                            .font(.system(size: 12.5)).lineSpacing(3).foregroundStyle(.secondary).padding(.vertical, 8)
                     } else {
                         ScrollView {
                             VStack(spacing: 3) {
@@ -120,7 +120,7 @@ struct SentContextSnapshot: View {
             }
             .help("查看这条消息实际发送时保存的材料")
         } else {
-            Text("旧消息 · 未记录材料快照").font(.system(size: 9.5)).foregroundStyle(.tertiary)
+            Text("旧消息 · 未记录材料快照").font(.system(size: 10.5)).foregroundStyle(.tertiary)
         }
     }
 }
@@ -140,10 +140,10 @@ private struct ContextMaterialRow: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            Image(systemName: icon).font(.system(size: 10.5)).foregroundStyle(.secondary).frame(width: 13).padding(.top, 3)
+            Image(systemName: icon).font(.system(size: 11.5)).foregroundStyle(.secondary).frame(width: 13).padding(.top, 3)
             VStack(alignment: .leading, spacing: 4) {
                 Button { presented.toggle() } label: {
-                    Text(item.title).font(.system(size: 11.5, weight: .medium)).lineLimit(1)
+                    Text(item.title).font(.system(size: 12.5, weight: .medium)).lineLimit(1)
                         .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                 }.buttonStyle(.plain).help("查看这项材料")
                     .popover(isPresented: $presented, arrowEdge: .leading) {
@@ -151,10 +151,10 @@ private struct ContextMaterialRow: View {
                     }
                 HStack(spacing: 7) {
                     Text(item.body.replacingOccurrences(of: "\n", with: " "))
-                        .font(.system(size: 10)).foregroundStyle(.tertiary).lineLimit(1)
+                        .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                     Spacer(minLength: 0)
                     ContextSourceJump(anchors: item.anchors, model: model)
-                        .font(.system(size: 9.5))
+                        .font(.system(size: 10.5))
                 }
             }
             if let remove {
@@ -188,13 +188,13 @@ private struct ContextMaterialPreview: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(item.title).font(.system(size: 13, weight: .semibold)).textSelection(.enabled)
+            Text(item.title).font(.system(size: 14, weight: .semibold)).textSelection(.enabled)
             if !item.anchors.isEmpty {
                 HStack {
                     Text("\(item.anchors.count) 处来源" + (sourceImages.isEmpty ? "" : " · \(sourceImages.count) 张图表"))
-                        .font(.system(size: 10.5)).foregroundStyle(.secondary)
+                        .font(.system(size: 11.5)).foregroundStyle(.secondary)
                     Spacer()
-                    ContextSourceJump(anchors: item.anchors, model: model).font(.system(size: 10.5))
+                    ContextSourceJump(anchors: item.anchors, model: model).font(.system(size: 11.5))
                 }
             }
             ScrollView {
@@ -202,18 +202,18 @@ private struct ContextMaterialPreview: View {
                     ForEach(Array(images.enumerated()), id: \.element.id) { index, image in
                         VStack(alignment: .leading, spacing: 5) {
                             Text("图表 \(index + 1) · PDF \(image.pageIndex + 1)")
-                                .font(.system(size: 9.5)).foregroundStyle(.tertiary)
+                                .font(.system(size: 10.5)).foregroundStyle(.tertiary)
                             Image(nsImage: image.image).resizable().scaledToFit()
                                 .frame(maxWidth: .infinity, maxHeight: 115, alignment: .leading)
                         }
                     }
                     if sourceImages.count > 3 {
                         Text("另有 \(sourceImages.count - 3) 张关联图表，可从来源菜单跳回原文。")
-                            .font(.system(size: 10)).foregroundStyle(.secondary)
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
                     }
                     if min(3, sourceImages.count) > images.count {
                         Text("\(min(3, sourceImages.count) - images.count) 张图表预览暂不可用，仍可跳回来源。")
-                            .font(.system(size: 10)).foregroundStyle(.tertiary)
+                            .font(.system(size: 11)).foregroundStyle(.tertiary)
                     }
                     MarkdownMessageView(text: item.body)
                 }
@@ -233,7 +233,7 @@ private struct ContextMaterialPreview: View {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(item.body, forType: .string)
                     }
-                } label: { Label(copyTitle, systemImage: "doc.on.doc").font(.system(size: 10.5)) }
+                } label: { Label(copyTitle, systemImage: "doc.on.doc").font(.system(size: 11.5)) }
                     .buttonStyle(.plain).foregroundStyle(.secondary)
                     .disabled(item.body.isEmpty && sourceImages.isEmpty)
             }

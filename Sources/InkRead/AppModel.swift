@@ -57,6 +57,34 @@ final class AppModel: ObservableObject {
     @Published var readerMetrics: ReaderMetrics?
     @Published var focusMode = false
     @Published var codexPath = UserDefaults.standard.string(forKey: "codexExecutable") ?? ""
+    @Published var selectedCodexModel = UserDefaults.standard.string(forKey: "inkreadCodexModel") ?? "" {
+        didSet { UserDefaults.standard.set(selectedCodexModel, forKey: "inkreadCodexModel") }
+    }
+    @Published var selectedCodexEffort = UserDefaults.standard.string(forKey: "inkreadCodexEffort") ?? "" {
+        didSet { UserDefaults.standard.set(selectedCodexEffort, forKey: "inkreadCodexEffort") }
+    }
+    @Published var availableModels: [CodexModelDescriptor] = []
+    @Published var isLoadingModels = false
+    @Published var modelLoadingError: String?
+    @Published var configuredModelName: String?
+    @Published var configuredModelEffort: String?
+    @Published var showTranslation = false
+    @Published var translationTerm = ""
+    @Published var translationText = ""
+    @Published var translationError: String?
+    @Published var translationActivity = ""
+    @Published var translationAnchor: SourceAnchor?
+    @Published var isTranslating = false
+    @Published var translationSaved = false
+    var translationScope = "本书"
+    var translationCompleted = false
+    var translationRequestID = UUID()
+    var translationTask: Task<Void, Never>?
+    var modelListTask: Task<Void, Never>?
+    var modelListRequestID = UUID()
+    var translationCache: [String: String] = [:]
+    var translationClient = CodexClient()
+    let catalogClient = CodexClient()
     @Published var appearanceMode = AppearanceMode(rawValue: UserDefaults.standard.string(forKey: "appearanceMode") ?? "system") ?? .system {
         didSet {
             UserDefaults.standard.set(appearanceMode.rawValue, forKey: "appearanceMode")
@@ -230,6 +258,7 @@ final class AppModel: ObservableObject {
         restoringContext = true
         defer { restoringContext = false; rememberDiscussion() }
         activeDocumentID = selectedBookID
+        closeTranslation()
         selection = nil
         lastResponseError = nil
         captureRegion = false
@@ -385,6 +414,10 @@ final class AppModel: ObservableObject {
         if currentDiscussion == nil { startDiscussion() }
         guard var discussion = currentDiscussion else { return }
         let context = effectiveContext(for: discussion)
+        if selectedModelDescriptor?.supportsImages == false,
+           context.contains(where: { $0.anchors.contains(where: { $0.imageRelativePath != nil }) }) {
+            lastResponseError = "当前模型不支持图像，请选择支持图像的模型后再讨论图表。"; return
+        }
         guard context.reduce(0, { $0 + $1.body.count + $1.anchors.reduce(0, { $0 + min(5000, $1.surroundingText?.count ?? 0) }) }) < 100_000 else {
             lastResponseError = "本次材料过长，请从上下文篮移除部分内容后再发送。"; return
         }
@@ -413,6 +446,8 @@ final class AppModel: ObservableObject {
         let imageURLs = context.flatMap { $0.anchors.compactMap(\.imageRelativePath) }.filter { seenImages.insert($0).inserted }
             .map { store.assetURL(relativePath: $0) }
         let previousThreadID = discussion.codexThreadID
+        let generationModel = selectedCodexModel.isEmpty ? nil : selectedCodexModel
+        let generationEffort = selectedCodexEffort.isEmpty ? nil : selectedCodexEffort
         responseTask = Task { [weak self] in
             guard let self else { return }
             defer { self.isGenerating = false; self.responseStartedAt = nil; self.activeAssistantID = nil; self.activeDiscussionID = nil; self.activity = "" }
@@ -422,6 +457,7 @@ final class AppModel: ObservableObject {
                     try await Task.detached { try Self.buildReadingContext(pdfURL: source, workspace: workspace, title: book.title) }.value
                 }
                 let answer = try await self.codex.respond(threadID: previousThreadID, prompt: input, imageURL: nil, imageURLs: imageURLs, workspaceURL: workspace,
+                    model: generationModel, effort: generationEffort,
                     onThread: { [weak self] threadID in
                         self?.updateDiscussion(discussionID) { $0.codexThreadID = threadID }
                     }, onDelta: { [weak self] delta in
@@ -571,11 +607,19 @@ final class AppModel: ObservableObject {
         }
     }
     func applyCodexPath() {
-        guard !isBusy else { return }
+        guard !isBusy, !isTranslating else { return }
         codex.shutdown()
+        modelListTask?.cancel()
+        modelListRequestID = UUID()
+        catalogClient.shutdown()
+        translationClient.shutdown()
         let path = codexPath.trimmingCharacters(in: .whitespacesAndNewlines)
         UserDefaults.standard.set(path, forKey: "codexExecutable")
         codex.executableOverride = path.isEmpty ? nil : path
+        catalogClient.executableOverride = path.isEmpty ? nil : path
+        translationClient.executableOverride = path.isEmpty ? nil : path
+        availableModels = []; configuredModelName = nil; configuredModelEffort = nil
+        modelLoadingError = nil; isLoadingModels = false
     }
     func flushBeforeExit() {
         rememberDraft()
@@ -586,6 +630,9 @@ final class AppModel: ObservableObject {
         }
         responseTask?.cancel()
         featureTask?.cancel()
+        closeTranslation()
+        modelListTask?.cancel()
+        catalogClient.shutdown()
         codex.shutdown()
     }
     func report(_ error: Error, prefix: String) { errorMessage = "\(prefix)：\(error.localizedDescription)" }

@@ -78,9 +78,114 @@ final class CodexBridgeTests: XCTestCase {
         let turn = try XCTUnwrap(messages.first { $0["method"] as? String == "turn/start" }?["params"] as? [String: Any])
         XCTAssertEqual((turn["sandboxPolicy"] as? [String: Any])?["type"] as? String, "readOnly")
         XCTAssertEqual((turn["sandboxPolicy"] as? [String: Any])?["networkAccess"] as? Bool, false)
-        XCTAssertNil(turn["model"])
+        XCTAssertEqual(turn["model"] as? String, "configured-model")
+        XCTAssertEqual(turn["effort"] as? String, "medium")
         let input = try XCTUnwrap(turn["input"] as? [[String: Any]])
         XCTAssertEqual(input.last?["type"] as? String, "localImage")
+    }
+
+    @MainActor
+    func testModelCatalogPaginationPreservesFutureEffortsAndFiltersHiddenEntries() async throws {
+        let fixture = try FakeServer(mode: "catalog")
+        defer { fixture.remove() }
+        let client = CodexClient(executableOverride: fixture.executable.path, requestTimeout: 2, turnTimeout: 3)
+        defer { client.shutdown() }
+        let models = try await client.listModels(workspaceURL: fixture.workspace)
+        XCTAssertEqual(models.map(\.model), ["configured-model", "future-model"])
+        XCTAssertEqual(models.last?.supportedReasoningEfforts.last?.reasoningEffort, "future-effort")
+        XCTAssertEqual(models.last?.inputModalities, ["text", "future-modality"])
+        XCTAssertFalse(models.last?.supportsImages ?? true)
+        XCTAssertTrue(models.first?.supportsImages ?? false, "Omitted modalities use the protocol's text/image default")
+        XCTAssertFalse(client.isRunning)
+        let requests = try fixture.requests()
+        let pages = requests.filter { $0["method"] as? String == "model/list" }
+        XCTAssertEqual(pages.count, 2)
+        XCTAssertEqual((pages.last?["params"] as? [String: Any])?["cursor"] as? String, "next-page")
+        XCTAssertFalse(requests.contains { ["thread/start", "thread/resume", "turn/start"].contains($0["method"] as? String ?? "") })
+    }
+
+    @MainActor
+    func testModelAndEffortOverridesChangeOnResumeAndResetToCLIConfigDefaults() async throws {
+        let fixture = try FakeServer(mode: "stream")
+        defer { fixture.remove() }
+        let client = CodexClient(executableOverride: fixture.executable.path, requestTimeout: 2, turnTimeout: 3)
+        defer { client.shutdown() }
+        for selection in [("future-model", "future-effort"), ("configured-model", "low"), (nil, nil)] as [(String?, String?)] {
+            _ = try await client.respond(threadID: selection.0 == "future-model" ? nil : "thread-1", prompt: "继续",
+                                         imageURL: nil, workspaceURL: fixture.workspace, model: selection.0, effort: selection.1,
+                                         onThread: { _ in }, onDelta: { _ in }, onActivity: { _ in })
+        }
+        let requests = try fixture.requests()
+        let starts = requests.filter { ["thread/start", "thread/resume"].contains($0["method"] as? String ?? "") }
+        let turns = requests.filter { $0["method"] as? String == "turn/start" }
+        XCTAssertEqual(starts.count, 3)
+        XCTAssertEqual(turns.count, 3)
+        for (index, expected) in [("future-model", "future-effort"), ("configured-model", "low"), ("configured-model", "medium")].enumerated() {
+            let start = try XCTUnwrap(starts[index]["params"] as? [String: Any])
+            let turn = try XCTUnwrap(turns[index]["params"] as? [String: Any])
+            XCTAssertEqual(start["model"] as? String, expected.0)
+            XCTAssertEqual((start["config"] as? [String: Any])?["model_reasoning_effort"] as? String, expected.1)
+            XCTAssertEqual(turn["model"] as? String, expected.0)
+            XCTAssertEqual(turn["effort"] as? String, expected.1)
+        }
+        XCTAssertEqual(requests.filter { $0["method"] as? String == "model/list" }.count, 1, "The catalog is cached per connection")
+    }
+
+    @MainActor
+    func testChoosingANewModelUsesItsEffortDefaultAndRejectsUnsupportedEffortBeforeSubmission() async throws {
+        let fixture = try FakeServer(mode: "stream")
+        defer { fixture.remove() }
+        let client = CodexClient(executableOverride: fixture.executable.path, requestTimeout: 2, turnTimeout: 3)
+        defer { client.shutdown() }
+        _ = try await client.respond(threadID: "thread-1", prompt: "继续", imageURL: nil, workspaceURL: fixture.workspace,
+                                     model: "future-model", onThread: { _ in }, onDelta: { _ in }, onActivity: { _ in })
+        let turns = try fixture.requests().filter { $0["method"] as? String == "turn/start" }
+        XCTAssertEqual((turns.last?["params"] as? [String: Any])?["effort"] as? String, "future-effort")
+        do {
+            _ = try await client.respond(threadID: "thread-1", prompt: "不应提交", imageURL: nil, workspaceURL: fixture.workspace,
+                                         model: "future-model", effort: "unsupported", onThread: { _ in }, onDelta: { _ in }, onActivity: { _ in })
+            XCTFail("Unsupported effort must fail before a turn is submitted")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("不支持"))
+        }
+        XCTAssertEqual(try fixture.requests().filter { $0["method"] as? String == "turn/start" }.count, 1)
+    }
+
+    @MainActor
+    func testCatalogDefaultResolvesWhenCLIHasNoExplicitModelAndBadPaginationFails() async throws {
+        let fixture = try FakeServer(mode: "catalogDefault")
+        defer { fixture.remove() }
+        let client = CodexClient(executableOverride: fixture.executable.path, requestTimeout: 2, turnTimeout: 3)
+        defer { client.shutdown() }
+        _ = try await respond(client, fixture: fixture)
+        let turn = try XCTUnwrap(try fixture.requests().first { $0["method"] as? String == "turn/start" }?["params"] as? [String: Any])
+        XCTAssertEqual(turn["model"] as? String, "configured-model")
+        XCTAssertEqual(turn["effort"] as? String, "low", "Catalog default is used without a CLI config override")
+        for mode in ["catalogLoop", "catalogMalformed", "catalogCursorMalformed"] {
+            let bad = try FakeServer(mode: mode)
+            defer { bad.remove() }
+            let broken = CodexClient(executableOverride: bad.executable.path, requestTimeout: 2, turnTimeout: 3)
+            defer { broken.shutdown() }
+            do {
+                _ = try await broken.listModels(workspaceURL: bad.workspace)
+                XCTFail("\(mode) must fail")
+            } catch {
+                guard case .protocolFailure = error as? CodexBridgeError else { return XCTFail("Unexpected error: \(error)") }
+            }
+            XCTAssertFalse(broken.isRunning)
+        }
+    }
+
+    @MainActor
+    func testInvalidConfiguredEffortFallsBackToTheModelsAdvertisedDefault() async throws {
+        let fixture = try FakeServer(mode: "unsupportedConfigEffort")
+        defer { fixture.remove() }
+        let client = CodexClient(executableOverride: fixture.executable.path, requestTimeout: 2, turnTimeout: 3)
+        defer { client.shutdown() }
+        _ = try await respond(client, fixture: fixture)
+        let turn = try XCTUnwrap(try fixture.requests().first { $0["method"] as? String == "turn/start" }?["params"] as? [String: Any])
+        XCTAssertEqual(client.configuredEffort, "unsupported")
+        XCTAssertEqual(turn["effort"] as? String, "low")
     }
 
     @MainActor
@@ -339,7 +444,20 @@ private struct FakeServer {
             if method=='initialize':
                 if mode=='initializeTimeout': continue
                 reply(req,{'userAgent':'fake'})
-            elif method=='config/read': reply(req,{'config':{'mcp_servers':{'unsafe':{'command':'not-run','enabled':True}}}})
+            elif method=='config/read':
+                config={'mcp_servers':{'unsafe':{'command':'not-run','enabled':True}}}
+                if mode!='catalogDefault': config.update(model='configured-model',model_reasoning_effort='medium')
+                if mode=='unsupportedConfigEffort': config['model_reasoning_effort']='unsupported'
+                reply(req,{'config':config})
+            elif method=='model/list':
+                first={'id':'configured-id','model':'configured-model','displayName':'Configured Model','description':'Default CLI model','isDefault':True,'hidden':False,'defaultReasoningEffort':'low','supportedReasoningEfforts':[{'reasoningEffort':'low','description':'Fast'},{'reasoningEffort':'medium','description':'Balanced'}]}
+                future={'id':'future-id','model':'future-model','displayName':'Future Model','description':'Forward compatibility','isDefault':False,'hidden':False,'defaultReasoningEffort':'future-effort','supportedReasoningEfforts':[{'reasoningEffort':'future-effort','description':'New effort'}],'inputModalities':['text','future-modality'],'futureMetadata':{'new':True}}
+                hidden=dict(future,id='hidden-id',model='hidden-model',hidden=True)
+                if mode=='catalogMalformed': first['model']=''
+                if mode=='catalog':
+                    reply(req,{'data':[first] if not req['params'].get('cursor') else [first,future,hidden],'nextCursor':'next-page' if not req['params'].get('cursor') else None})
+                else:
+                    reply(req,{'data':[first,future],'nextCursor':'same-page' if mode=='catalogLoop' else (42 if mode=='catalogCursorMalformed' else None)})
             elif method in ['thread/start','thread/resume']:
                 reply(req,{'thread':{'id':'thread-1'},'sandbox':{'type':'dangerFullAccess' if mode=='unsafePolicy' else 'readOnly'},'approvalPolicy':'never'})
             elif method=='mcpServerStatus/list':

@@ -3,6 +3,7 @@ import CoreText
 import Foundation
 import PDFKit
 import InkReadCore
+import CodexBridge
 
 /// Opt-in live integration test. It uses the real app model and real Codex,
 /// but only a newly created synthetic PDF inside an explicitly isolated library.
@@ -48,7 +49,16 @@ enum SmokeTest {
         // checks. A rejected library root must not receive even a report file.
         var reportURL = explicitReport.flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
         let oldLastBookID = UserDefaults.standard.object(forKey: "lastBookID")
-        let deadline = Date().addingTimeInterval(180)
+        let oldModel = UserDefaults.standard.object(forKey: "inkreadCodexModel")
+        let oldEffort = UserDefaults.standard.object(forKey: "inkreadCodexEffort")
+        let languageChecks = environment["INKREAD_SMOKE_LANGUAGE"] == "1"
+        let deadline = Date().addingTimeInterval(languageChecks ? 300 : 180)
+        defer {
+            for (key, original) in [("inkreadCodexModel", oldModel), ("inkreadCodexEffort", oldEffort)] {
+                if let original { UserDefaults.standard.set(original, forKey: key) }
+                else { UserDefaults.standard.removeObject(forKey: key) }
+            }
+        }
 
         do {
             begin("isolation", report: &report, at: reportURL)
@@ -101,6 +111,26 @@ enum SmokeTest {
             }
             pass(["bookID": book.id.uuidString, "workspace": workspace.path, "contextFiles": "source.pdf, BOOK.md, both page text files"],
                  report: &report, at: reportURL)
+
+            if languageChecks {
+                begin("live-model-list-and-explicit-selection", report: &report, at: reportURL)
+                model.refreshCodexModels()
+                try await wait(until: { !model.isLoadingModels }, deadline: deadline, label: "available Codex models")
+                guard let descriptor = model.availableModels.first(where: { $0.isDefault }) ?? model.availableModels.first else {
+                    throw Failure(model.modelLoadingError ?? "Codex returned no selectable models.")
+                }
+                let effort = descriptor.supportedReasoningEfforts.first(where: { $0.reasoningEffort == "low" })?.reasoningEffort
+                    ?? descriptor.supportedReasoningEfforts.first(where: { $0.reasoningEffort == descriptor.defaultReasoningEffort })?.reasoningEffort
+                    ?? descriptor.supportedReasoningEfforts.first?.reasoningEffort
+                guard let effort else { throw Failure("The selected model returned no supported reasoning efforts.") }
+                model.selectCodexModel(descriptor.model)
+                model.selectCodexEffort(effort)
+                try require(model.selectedCodexModel == descriptor.model && model.selectedCodexEffort == effort,
+                            "The app did not retain the explicitly selected model and effort.")
+                pass(["modelCount": String(model.availableModels.count), "model": descriptor.model,
+                      "displayName": descriptor.displayName, "effort": effort,
+                      "appliesToFollowingFreshAndResumedTurns": "true"], report: &report, at: reportURL)
+            }
 
             begin("real-pdf-text-selection", report: &report, at: reportURL)
             let passage = "Spaced review improves recall by revisiting information over time."
@@ -291,10 +321,85 @@ enum SmokeTest {
                 try require(entry?.term == "Spaced review" && entry?.scope == "Synthetic page 1" && entry?.anchors.first?.pageIndex == 0, "Saved term lost chapter or source")
                 pass(["term": "Spaced review", "actualDefinition": meaning, "chapterAndAnchorPreserved": "true", "reviewRequired": "true"], report: &report, at: reportURL)
             }
+            if languageChecks {
+                begin("contextual-word-translation-and-source-snapshot", report: &report, at: reportURL)
+                let word = "recall"
+                let wordRange = (fullText as NSString).range(of: word)
+                try require(wordRange.location != NSNotFound, "The word-translation fixture is not extractable.")
+                guard let selectedWord = textPage.selection(for: wordRange) else { throw Failure("PDFKit did not select the word fixture.") }
+                let wordRects = selectedWord.selectionsByLine().map { $0.bounds(for: textPage) }
+                    .filter { !$0.isEmpty && !$0.isNull }
+                    .map { PageRect(x: $0.minX, y: $0.minY, width: $0.width, height: $0.height) }
+                try require(!wordRects.isEmpty, "The translation selection has no page coordinates.")
+                let originalTerms = store.terms.count
+                let originalDiscussions = store.discussions.count
+                let originalMessages = store.discussions.reduce(0) { $0 + $1.messages.count }
+                model.receiveSelection(ReaderSelection(pageIndex: 0, pageLabel: "1", text: selectedWord.string ?? word,
+                    rects: wordRects, imageData: nil, surroundingText: fullText))
+                model.translateSelection()
+                try require(model.showTranslation && model.isTranslating, "The explicit translate action did not start a translation.")
+                let capturedAnchor = model.translationAnchor
+                // Reading and selecting a new passage must not retarget the
+                // in-flight translation, its source link or its later term save.
+                model.receiveSelection(ReaderSelection(pageIndex: 1, pageLabel: "2", text: "Synthetic bar chart",
+                    rects: [chartAnchorRect], imageData: nil, surroundingText: "An unrelated page selected after translation started."))
+                try await wait(until: { !model.isTranslating }, deadline: deadline, label: "contextual word translation")
+                let translation = model.translationText
+                try require(model.translationError == nil && !translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                            model.translationError ?? "Translation returned an empty result.")
+                try require(translation.range(of: #"\p{Han}"#, options: .regularExpression) != nil,
+                            "The English word translation did not contain a Chinese explanation: \(translation)")
+                try require(["记忆", "回忆", "回想", "记住", "记起"].contains(where: translation.contains),
+                            "The translation did not explain recall in the learning context: \(translation)")
+                try require(model.translationTerm == word && model.translationAnchor == capturedAnchor &&
+                            capturedAnchor?.pageIndex == 0 && capturedAnchor?.rects == wordRects && capturedAnchor?.selectedText == word,
+                            "Selecting another passage changed the captured translation source.")
+                try require(store.terms.count == originalTerms && store.discussions.count == originalDiscussions &&
+                            store.discussions.reduce(0) { $0 + $1.messages.count } == originalMessages,
+                            "A word lookup changed saved terminology or the reading discussion before explicit save.")
+                try require(model.canSaveTranslation, "A completed translation is not available to save.")
+                pass(["word": word, "actualTranslation": translation, "sourcePage": "1", "readerMovedToPage": "2",
+                      "capturedSourceUnchanged": "true", "discussionUnchanged": "true", "explicitSaveRequired": "true"],
+                     report: &report, at: reportURL)
+
+                begin("translation-glossary-save-reload-and-source-jump", report: &report, at: reportURL)
+                model.saveTranslationToGlossary()
+                guard let translatedTerm = store.terms.first(where: { $0.term == word && $0.meaning == translation }) else {
+                    throw Failure(model.errorMessage ?? "The explicit save did not create the translated glossary entry.")
+                }
+                try require(store.terms.count == originalTerms + 1 && translatedTerm.documentID == book.id &&
+                            translatedTerm.anchors == capturedAnchor.map { [$0] },
+                            "The saved translation lost its captured book, word or original selection anchor.")
+                model.saveTranslationToGlossary()
+                try require(store.terms.count == originalTerms + 1, "Saving the same lookup twice created duplicate terms.")
+                model.closeTranslation()
+                let languageReload = try LibraryStore(rootURL: root)
+                guard let reloadedTerm = languageReload.terms.first(where: { $0.id == translatedTerm.id }) else {
+                    throw Failure("Reloading lost the translated glossary entry.")
+                }
+                try require(reloadedTerm.id == translatedTerm.id && reloadedTerm.documentID == translatedTerm.documentID &&
+                            reloadedTerm.term == translatedTerm.term && reloadedTerm.meaning == translatedTerm.meaning &&
+                            reloadedTerm.scope == translatedTerm.scope && reloadedTerm.anchors == translatedTerm.anchors,
+                            "Reloading changed the translated glossary content or exact source anchors.")
+                // The existing manifest's ISO-8601 date strategy stores whole
+                // seconds. Content, IDs and page coordinates must remain exact;
+                // only the documented timestamp precision may be normalized.
+                try require(abs(reloadedTerm.createdAt.timeIntervalSince(translatedTerm.createdAt)) < 1 &&
+                            abs(reloadedTerm.updatedAt.timeIntervalSince(translatedTerm.updatedAt)) < 1,
+                            "Reloading changed the translated glossary timestamps beyond persisted precision.")
+                guard let source = translatedTerm.anchors.first else { throw Failure("The translated term has no original source to jump to.") }
+                model.jumpTo(source)
+                try require(model.readerJump?.pageIndex == 0 && model.readerJump?.rects == wordRects,
+                            "The translated term did not jump to its original word after reading moved elsewhere.")
+                pass(["termID": translatedTerm.id.uuidString, "scope": translatedTerm.scope,
+                      "capturedSourceRetained": "true", "repeatSaveIsIdempotent": "true", "reloadAndJumpPassed": "true"],
+                     report: &report, at: reportURL)
+            }
             report.status = "passed"
             model.notice = "真实 Codex 集成自测通过，报告与测试书库已保存。"
         } catch {
             model.cancelResponse()
+            model.closeTranslation()
             let detail = error.localizedDescription
             report.status = "failed"
             report.error = detail
@@ -341,7 +446,7 @@ enum SmokeTest {
     private static func wait(until condition: () -> Bool, deadline: Date, label: String) async throws {
         while !condition() {
             try Task.checkCancellation()
-            guard Date() < deadline else { throw Failure("The 180-second live smoke-test deadline expired while waiting for \(label).") }
+            guard Date() < deadline else { throw Failure("The live smoke-test deadline expired while waiting for \(label).") }
             try await Task.sleep(nanoseconds: 150_000_000)
         }
     }

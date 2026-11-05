@@ -31,7 +31,7 @@ struct WorkbenchIcon: View {
     }
     var body: some View {
         Button(action: action) {
-            Image(systemName: symbol).font(.system(size: 11, weight: .medium))
+            Image(systemName: symbol).font(.system(size: 12, weight: .medium))
                 .foregroundStyle(active ? Color.accent : .secondary).frame(width: 25, height: 26)
                 .background(active ? Color.accent.opacity(0.12) : hovered ? Color.secondary.opacity(0.09) : .clear, in: RoundedRectangle(cornerRadius: 4))
                 .contentShape(Rectangle())
@@ -70,6 +70,6 @@ struct SearchField: View {
             if !text.isEmpty {
                 Button { text = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary) }.buttonStyle(.plain)
             }
-        }.font(.system(size: 12)).padding(9).background(Color.paper.opacity(0.7), in: RoundedRectangle(cornerRadius: 6))
+        }.font(.system(size: 13)).padding(9).background(Color.paper.opacity(0.7), in: RoundedRectangle(cornerRadius: 6))
     }
 }

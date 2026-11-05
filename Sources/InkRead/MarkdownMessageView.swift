@@ -13,13 +13,13 @@ struct MarkdownMessageView: View {
                 case .paragraph(let value): inline(value)
                 case .heading(let level, let value):
                     inline(value)
-                        .font(.system(size: level == 1 ? 18 : level == 2 ? 16 : 14, weight: .semibold))
+                        .font(.system(size: level == 1 ? 18 : level == 2 ? 16 : 15, weight: .semibold))
                         .padding(.top, block.line == 0 ? 0 : 4)
                 case .list(let items):
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(items) { item in
                             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                Text(item.marker).font(.system(size: 13, design: .monospaced))
+                                Text(item.marker).font(.system(size: 14, design: .monospaced))
                                     .foregroundStyle(.secondary).frame(minWidth: 12, alignment: .trailing)
                                 inline(item.text).frame(maxWidth: .infinity, alignment: .leading)
                             }.padding(.leading, CGFloat(min(item.indent, 4)) * 12)
@@ -39,7 +39,7 @@ struct MarkdownMessageView: View {
                 }
             }
         }
-        .font(.system(size: 14))
+        .font(.system(size: 15))
         .lineSpacing(4)
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -55,7 +55,7 @@ private enum InspectorInlineMarkdown {
         var attributed = (try? AttributedString(markdown: value,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(value)
         for run in attributed.runs where run.inlinePresentationIntent?.contains(.code) == true {
-            attributed[run.range].font = .system(size: 12.5, design: .monospaced)
+            attributed[run.range].font = .system(size: 13.5, design: .monospaced)
         }
         // Add navigation attributes after Markdown parsing. This leaves the raw
         // reply untouched and preserves existing web links (including a link
@@ -89,7 +89,7 @@ private struct InspectorMarkdownTable: View {
         table.header.indices.map { column in
             let values = [table.header[column]] + table.rows.map { $0[column] }
             let widest = values.map {
-                NSAttributedString(string: $0, attributes: [.font: NSFont.systemFont(ofSize: 12)]).size().width
+                NSAttributedString(string: $0, attributes: [.font: NSFont.systemFont(ofSize: 13)]).size().width
             }.max() ?? 80
             return min(210, max(80, ceil(widest)))
         }
@@ -122,7 +122,7 @@ private struct InspectorMarkdownTable: View {
                     try? await Task.sleep(nanoseconds: 1_600_000_000)
                     if !Task.isCancelled { copied = false }
                 }
-            }.font(.system(size: 10.5))
+            }.font(.system(size: 11.5))
             ScrollView(.horizontal) {
                 Grid(alignment: .topLeading, horizontalSpacing: 0, verticalSpacing: 0) {
                     GridRow(alignment: .top) {
@@ -157,7 +157,7 @@ private struct InspectorMarkdownTable: View {
     private func cell(_ value: String, column: Int, width: CGFloat, heading: Bool) -> some View {
         let attributed = InspectorInlineMarkdown.attributed(value)
         let alignment: Alignment = table.alignments[column] == .center ? .center : table.alignments[column] == .trailing ? .trailing : .leading
-        return Text(attributed).font(.system(size: 12, weight: heading ? .semibold : .regular))
+        return Text(attributed).font(.system(size: 13, weight: heading ? .semibold : .regular))
             .lineSpacing(3).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
             .frame(width: width, alignment: alignment).padding(.horizontal, 10).padding(.vertical, 8)
     }
@@ -178,7 +178,7 @@ private struct InspectorCodeBlock: View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
                 Text(language.isEmpty ? "代码" : language.uppercased())
-                    .font(.system(size: 10, weight: .medium, design: .monospaced)).tracking(0.7)
+                    .font(.system(size: 11, weight: .medium, design: .monospaced)).tracking(0.7)
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button {
@@ -187,7 +187,7 @@ private struct InspectorCodeBlock: View {
                     copied = true
                 } label: {
                     Label(copied ? "已复制" : "复制", systemImage: copied ? "checkmark" : "doc.on.doc")
-                        .font(.system(size: 10.5))
+                        .font(.system(size: 11.5))
                 }.buttonStyle(.plain).foregroundStyle(.secondary)
                     .help("复制代码")
                     .task(id: copied) {
@@ -199,7 +199,7 @@ private struct InspectorCodeBlock: View {
             Rectangle().fill(Color(nsColor: .separatorColor).opacity(0.45)).frame(height: 1)
             ScrollView(.horizontal) {
                 Text(verbatim: code.isEmpty ? " " : code)
-                    .font(.system(size: 12, design: .monospaced)).lineSpacing(3)
+                    .font(.system(size: 13, design: .monospaced)).lineSpacing(3)
                     .textSelection(.enabled).fixedSize(horizontal: true, vertical: true)
                     .padding(11).frame(maxWidth: .infinity, alignment: .leading)
             }

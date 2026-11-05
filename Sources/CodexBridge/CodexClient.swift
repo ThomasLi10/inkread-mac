@@ -22,6 +22,9 @@ public final class CodexClient: ObservableObject {
     private var stderrLog = RedactedLogBuffer()
     private var run: RunState?
     private var disabledMCPConfig: [String: Any] = [:]
+    public private(set) var configuredModel: String?
+    public private(set) var configuredEffort: String?
+    private var modelCatalog: [CodexModelDescriptor]?
 
     private struct PendingRequest {
         let continuation: CheckedContinuation<[String: Any], Error>
@@ -73,6 +76,7 @@ public final class CodexClient: ObservableObject {
 
     public func respond(
         threadID: String?, prompt: String, imageURL: URL?, imageURLs: [URL] = [], workspaceURL: URL,
+        model: String? = nil, effort: String? = nil,
         onThread: @escaping (String) -> Void,
         onDelta: @escaping (String) -> Void,
         onActivity: @escaping (String) -> Void
@@ -93,11 +97,19 @@ public final class CodexClient: ObservableObject {
             do {
                 try await connect(workspace: workspaceURL)
                 try checkActive(state)
+                let selection = try await resolveModelSelection(model: model, effort: effort)
+                try checkActive(state)
                 state.activity(threadID == nil ? "正在创建本书的讨论…" : "正在续接讨论…")
+                var config = disabledMCPConfig
+                // Resume must replace any previous per-turn override as well.
+                // An explicit null clears an inherited optional effort for a
+                // custom provider absent from the standard model catalog.
+                config["model_reasoning_effort"] = selection.effort.map { $0 as Any } ?? NSNull()
                 var params: [String: Any] = [
                     "cwd": workspaceURL.standardizedFileURL.path,
                     "sandbox": "read-only", "approvalPolicy": "never",
-                    "config": disabledMCPConfig,
+                    "config": config,
+                    "model": selection.model,
                     "developerInstructions": Self.readingInstructions
                 ]
                 let response: [String: Any]
@@ -136,12 +148,15 @@ public final class CodexClient: ObservableObject {
                     self.disconnect(error: CodexBridgeError.timedOut("回答"))
                 }
                 state.awaitingTurnStart = true
-                let turnResponse = try await request("turn/start", params: [
+                var turnParams: [String: Any] = [
                     "threadId": id, "input": input,
                     "cwd": workspaceURL.standardizedFileURL.path,
                     "approvalPolicy": "never",
-                    "sandboxPolicy": ["type": "readOnly", "networkAccess": false]
-                ])
+                    "sandboxPolicy": ["type": "readOnly", "networkAccess": false],
+                    "model": selection.model
+                ]
+                if let effort = selection.effort { turnParams["effort"] = effort }
+                let turnResponse = try await request("turn/start", params: turnParams)
                 try checkActive(state)
                 guard let turn = turnResponse["turn"] as? [String: Any],
                       let turnID = turn["id"] as? String, !turnID.isEmpty else {
@@ -178,6 +193,76 @@ public final class CodexClient: ObservableObject {
                 self?.cancel()
             }
         }
+    }
+
+    /// Refreshes the CLI's available picker entries without starting a thread or
+    /// submitting a model turn. It does not inspect authentication files.
+    public func listModels(workspaceURL: URL) async throws -> [CodexModelDescriptor] {
+        guard !isRunning else { throw CodexBridgeError.busy }
+        isRunning = true
+        defer { isRunning = false }
+        do {
+            try await connect(workspace: workspaceURL)
+            let models = try await fetchModelCatalog()
+            modelCatalog = models
+            return models.filter { !$0.hidden }
+        } catch {
+            disconnect(error: error)
+            throw error
+        }
+    }
+
+    private func fetchModelCatalog() async throws -> [CodexModelDescriptor] {
+        var cursor: String?
+        var visited = Set<String>()
+        var models: [CodexModelDescriptor] = []
+        var modelIDs = Set<String>()
+        repeat {
+            var params: [String: Any] = ["limit": 100, "includeHidden": false]
+            if let cursor { params["cursor"] = cursor }
+            let response = try await request("model/list", params: params)
+            guard let entries = response["data"] as? [[String: Any]] else {
+                throw CodexBridgeError.protocolFailure("模型列表缺少 data")
+            }
+            do {
+                for entry in entries {
+                    let data = try JSONSerialization.data(withJSONObject: entry)
+                    let model = try JSONDecoder().decode(CodexModelDescriptor.self, from: data)
+                    if modelIDs.insert(model.id).inserted { models.append(model) }
+                }
+            } catch {
+                throw CodexBridgeError.protocolFailure("本机 Codex 返回了无法读取的模型信息")
+            }
+            if let rawCursor = response["nextCursor"], !(rawCursor is NSNull), !(rawCursor is String) {
+                throw CodexBridgeError.protocolFailure("模型列表分页游标无效")
+            }
+            cursor = (response["nextCursor"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            if let cursor, !visited.insert(cursor).inserted {
+                throw CodexBridgeError.protocolFailure("模型列表分页没有前进")
+            }
+        } while cursor != nil
+        return models
+    }
+
+    private func resolveModelSelection(model: String?, effort: String?) async throws -> (model: String, effort: String?) {
+        if modelCatalog == nil { modelCatalog = try await fetchModelCatalog() }
+        let entries = modelCatalog ?? []
+        let explicitModel = model?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        let explicitEffort = effort?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        guard let resolvedModel = explicitModel ?? configuredModel ?? entries.first(where: \.isDefault)?.model else {
+            throw CodexBridgeError.protocolFailure("本机 Codex 没有提供默认模型，请明确选择模型")
+        }
+        let entry = entries.first { $0.model == resolvedModel || $0.id == resolvedModel }
+        if let explicitEffort, let entry,
+           !entry.supportedReasoningEfforts.contains(where: { $0.reasoningEffort == explicitEffort }) {
+            throw CodexBridgeError.protocolFailure("模型 \(entry.displayName) 不支持 effort：\(explicitEffort)")
+        }
+        var defaultEffort = (explicitModel == nil || resolvedModel == configuredModel) ? configuredEffort : nil
+        if let candidate = defaultEffort, let entry,
+           !entry.supportedReasoningEfforts.contains(where: { $0.reasoningEffort == candidate }) {
+            defaultEffort = nil
+        }
+        return (entry?.model ?? resolvedModel, explicitEffort ?? defaultEffort ?? entry?.defaultReasoningEffort)
     }
 
     public func cancel() {
@@ -234,7 +319,7 @@ public final class CodexClient: ObservableObject {
                 self.receive(event)
             }
         }
-        _ = try await request("initialize", params: ["clientInfo": ["name": "inkread", "title": "InkRead", "version": "0.1.0"], "capabilities": ["experimentalApi": false]])
+        _ = try await request("initialize", params: ["clientInfo": ["name": "inkread", "title": "InkRead", "version": "0.4.0"], "capabilities": ["experimentalApi": false]])
         try transport.write(["method": "initialized"])
         // Obtain only configured MCP names, never their credentials. Disable each
         // inherited server at thread scope before starting any model turn.
@@ -243,6 +328,8 @@ public final class CodexClient: ObservableObject {
             throw CodexBridgeError.protocolFailure("无法读取安全配置")
         }
         let servers = config["mcp_servers"] as? [String: Any] ?? [:]
+        configuredModel = (config["model"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        configuredEffort = (config["model_reasoning_effort"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
         disabledMCPConfig = ["sandbox_mode": "read-only", "approval_policy": "never"]
         // App-server's config override keys are split on dots and do not support
         // TOML quoting here. Replacing the whole table avoids both dotted server
@@ -465,6 +552,9 @@ public final class CodexClient: ObservableObject {
 
     private func disconnect(error: Error, updateStatus: Bool = true, failRun: Bool = true) {
         initialized = false
+        configuredModel = nil
+        configuredEffort = nil
+        modelCatalog = nil
         connectionID = UUID()
         transport?.stop()
         transport = nil

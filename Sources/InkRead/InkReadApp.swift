@@ -44,6 +44,8 @@ struct InkReadApp: App {
                 Divider()
                 Button("选区加入上下文篮", action: model.addSelectionToContext).keyboardShortcut("c", modifiers: [.command, .shift])
                 Button("为选区添加彩色批注") { model.openAnnotationEditor() }.keyboardShortcut("h", modifiers: [.command, .shift])
+                Button("翻译选中英文", action: model.translateSelection).keyboardShortcut("t", modifiers: [.command, .shift])
+                    .disabled(!model.canTranslateSelection)
                 Button("固定参考页", action: model.pinSelection).keyboardShortcut("p", modifiers: [.command, .shift])
                 Divider()
                 Button("上一页") { model.turnPage(-1) }.keyboardShortcut(.upArrow, modifiers: .command)
@@ -59,7 +61,7 @@ struct InkReadApp: App {
                 Toggle("深色时反转 PDF 颜色", isOn: $model.invertPDFInDarkMode)
             }
         }
-        Settings { SettingsView(model: model).frame(width: 580, height: 430).padding(24).tint(Color.accent) }
+        Settings { SettingsView(model: model).frame(width: 580, height: 580).padding(24).tint(Color.accent) }
     }
 }
 

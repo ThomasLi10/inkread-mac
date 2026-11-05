@@ -308,11 +308,14 @@ extension AppModel {
         let anchor = featureAnchor
         isOrganizing = true; featureStatus = "Codex 正在查阅本书…"
         let prompt = readingPrompt(question: question, book: book, anchor: anchor)
+        let generationModel = selectedCodexModel.isEmpty ? nil : selectedCodexModel
+        let generationEffort = selectedCodexEffort.isEmpty ? nil : selectedCodexEffort
         featureTask = Task { [weak self] in
             guard let self else { return }
             defer { self.isOrganizing = false }
             do {
                 let reply = try await self.codex.respond(threadID: nil, prompt: prompt, imageURL: anchor?.imageRelativePath.map { store.assetURL(relativePath: $0) }, workspaceURL: store.workspaceURL(for: book),
+                    model: generationModel, effort: generationEffort,
                     onThread: { _ in }, onDelta: { _ in }, onActivity: { [weak self] in self?.featureStatus = $0 })
                 guard !Task.isCancelled, self.featureDocumentID == id, self.featureSheet == kind else { return }
                 self.featureStatus = "建议已生成，可编辑后保存"; apply(reply)
