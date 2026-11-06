@@ -4,6 +4,19 @@
 
 应用主体使用 SwiftUI、AppKit 和 PDFKit 自主编写，调用本机官方 Codex CLI 的 `app-server` 协议。项目没有复制第三方阅读器的源码，也没有为项目预设开源许可证。
 
+## 下载与安装
+
+在 [GitHub Releases](https://github.com/ThomasLi10/inkread-mac/releases) 按版本下载应用；最新版本见 [Latest Release](https://github.com/ThomasLi10/inkread-mac/releases/latest)。
+
+- **系统要求**：macOS 14 或更新版本。当前预编译包为 Apple Silicon（M1/M2/M3/M4 及更新的 M 系列）`arm64`，不适用于 Intel Mac。
+- **推荐 DMG**：下载 `InkRead-版本号-macOS-arm64.dmg`，打开后将“墨读.app”拖入 `Applications`。也可放到 `~/Applications`，然后在 Finder 中打开。
+- **ZIP 备选**：下载同版本 `.zip`，解压后把“墨读.app”移到应用程序目录。不要下载 GitHub 自动生成的 `Source code` 来安装应用。
+- **首次打开**：当前包使用本地 ad-hoc 签名，尚无 Apple Developer ID 签名和公证。如果 macOS 阻止打开，在确认从本仓库下载后，按 [Apple 官方说明](https://support.apple.com/en-us/102445) 前往“系统设置 → 隐私与安全性 → 仍要打开”。组织管理的 Mac 可能不允许例外。
+- **Codex 功能**：PDF 阅读、批注和本地笔记不需要 Codex；讨论、翻译、标签建议等 AI 功能，需要使用者自行安装并登录官方 Codex CLI，或配置本机可用的 Codex 可执行文件。安装包不包含账号、登录凭证、阅读内容或 AI 使用额度。
+- **升级**：先退出旧版，再用新版替换原应用。书库位于 `~/Library/Application Support/InkRead`，与应用包分开；重要笔记建议先导出备份。当前没有应用内自动更新，需从 Releases 手动下载。
+
+每个版本附 `SHA256SUMS.txt`，供核对下载文件。公开仓库只改变代码可见性，当前未授予额外开源许可证。
+
 ## 打开墨读
 
 已安装版本位于 `~/Applications/墨读.app`。在 Finder 按 ⇧⌘G，输入该路径并回车即可打开；也可在终端运行：
@@ -111,6 +124,18 @@ open build/墨读.app
 ```
 
 目标为 `~/Applications/墨读.app`。若已有同名 App，脚本只替换 `CFBundleIdentifier` 为 `local.thomas.inkread` 的旧版本，并把旧版本保存到 `~/Applications/InkRead Backups/`。同名但标识不同的文件或符号链接会保留，并停止安装。安装不修改书库，不执行设置默认 PDF 阅读器的操作。
+
+## 制作版本安装包
+
+维护者在 macOS 上运行（需要上述 Swift 构建环境与 Python 3）：
+
+```bash
+./scripts/package-release.sh
+```
+
+脚本读取应用版本和架构，在 `release/<版本>/` 生成 `.dmg`、`.zip` 和 `SHA256SUMS.txt`，并检查包内应用、签名、ZIP CRC 和 DMG 只读挂载结果。`--skip-build` 可使用已有的 `build/墨读.app`；`--output-dir DIR` 可指定输出目录。已有同名发布文件时会停止，避免改写已经分发的版本。
+
+将版本对应的 Git 提交打上 `v<版本>` 标签，在 GitHub Releases 新建同名版本并上传这三个文件，即可保留每一版的安装包和更新说明。打包脚本只在本地生成文件，不会自动上传或安装应用。制作包仍使用现有 ad-hoc 签名，不会自动获得 Developer ID 或 Apple 公证。
 
 ## 连接本地 Codex
 
