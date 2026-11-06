@@ -556,9 +556,17 @@ struct ResearchInspector: View {
             if !note.anchors.isEmpty {
                 HStack(spacing: 8) {
                     Image(systemName: "text.quote").font(.system(size: 11)).foregroundStyle(.tertiary)
-                    ForEach(Array(note.anchors.prefix(4))) { anchor in
+                    ForEach(Array(note.anchors.prefix(3))) { anchor in
                         Button("PDF \(anchor.pageIndex + 1)") { model.jumpTo(anchor) }
                             .font(.system(size: 11.5)).buttonStyle(.plain).foregroundStyle(Color.accent).help("回到原文")
+                    }
+                    if note.anchors.count > 3 {
+                        Menu("更多来源") {
+                            ForEach(Array(note.anchors.dropFirst(3))) { anchor in
+                                Button(sourceTitle(for: anchor)) { model.jumpTo(anchor) }
+                            }
+                        }.menuStyle(.borderlessButton).fixedSize().font(.system(size: 11.5))
+                            .foregroundStyle(Color.accent).help("查看其余 \(note.anchors.count - 3) 处原文来源")
                     }
                 }
             }
@@ -578,6 +586,12 @@ struct ResearchInspector: View {
                 Button("编辑") { model.openNoteEditor(existing: note) }.disabled(model.isBusy)
             }.buttonStyle(.plain).font(.system(size: 11.5)).foregroundStyle(.secondary)
         }.padding(.horizontal, 18).padding(.vertical, 17).frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func sourceTitle(for anchor: SourceAnchor) -> String {
+        let excerpt = anchor.selectedText?.split(whereSeparator: \.isWhitespace).joined(separator: " ") ?? ""
+        let detail = excerpt.isEmpty ? (anchor.imageRelativePath == nil ? "原文位置" : "图表") : String(excerpt.prefix(36))
+        return "PDF \(anchor.pageIndex + 1) · " + detail
     }
 
     private func copy(_ text: String) {

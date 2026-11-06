@@ -404,7 +404,7 @@ struct ContentView: View {
                 WorkbenchIcon("清除选区", symbol: "xmark") { model.clearReaderSelection() }
             }
             HStack(spacing: 7) {
-                Button { model.startDiscussion() } label: { Text("提问").font(.system(size: 12, weight: .medium)) }
+                Button(action: model.discussSelection) { Text("提问").font(.system(size: 12, weight: .medium)) }
                     .buttonStyle(.borderedProminent).foregroundStyle(Color.onAccent).controlSize(.small).disabled(model.isBusy)
                     .help("引用这段原文并开始提问")
                 if selection.imageData == nil {

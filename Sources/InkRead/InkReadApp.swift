@@ -50,7 +50,7 @@ struct InkReadApp: App {
                 Divider()
                 Button("上一页") { model.turnPage(-1) }.keyboardShortcut(.upArrow, modifiers: .command)
                 Button("下一页") { model.turnPage(1) }.keyboardShortcut(.downArrow, modifiers: .command)
-                Button("讨论选中内容") { model.startDiscussion() }.keyboardShortcut("d", modifiers: [.command, .shift])
+                Button("讨论选中内容", action: model.discussSelection).keyboardShortcut("d", modifiers: [.command, .shift])
                 Button("保存为笔记") { model.openNoteEditor() }.keyboardShortcut("s", modifiers: [.command, .shift])
             }
             CommandMenu("外观") {

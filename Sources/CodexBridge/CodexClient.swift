@@ -381,7 +381,7 @@ public final class CodexClient: ObservableObject {
                 self.receive(event)
             }
         }
-        _ = try await request("initialize", params: ["clientInfo": ["name": "inkread", "title": "InkRead", "version": "0.5.0"], "capabilities": ["experimentalApi": false]])
+        _ = try await request("initialize", params: ["clientInfo": ["name": "inkread", "title": "InkRead", "version": "0.5.1"], "capabilities": ["experimentalApi": false]])
         try transport.write(["method": "initialized"])
         // Obtain only configured MCP names, never their credentials. Disable each
         // inherited server at thread scope before starting any model turn.

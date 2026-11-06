@@ -9,7 +9,7 @@ struct ContextBasketView: View {
     var compact = false
     @State private var presented = false
 
-    private var nextMaterials: [ContextItem] {
+    private var activeMaterials: [ContextItem] {
         if let discussion = model.currentDiscussion { return model.effectiveContext(for: discussion) }
         guard let book = model.selectedBook else { return model.contextItems }
         // A new discussion will capture this selection when the question is
@@ -21,9 +21,51 @@ struct ContextBasketView: View {
         return model.effectiveContext(for: Discussion(documentID: book.id, anchor: anchor))
     }
 
+    /// Use the same complete catalog as submission, including sources carried
+    /// by prior questions after their live attachments have been removed.
+    private var nextMaterials: [ContextItem] {
+        guard let discussion = model.currentDiscussion else { return activeMaterials }
+        return LocalConversationContext(history: discussion.messages, currentMaterials: activeMaterials,
+            initialMaterial: discussion.anchor.map { model.contextItem(for: $0) }).materials
+    }
+
+    private var hasHistory: Bool { model.currentDiscussion?.messages.contains(where: { $0.role == .user }) == true }
+
+    /// A catalog item may retain an old snapshot UUID after deduplication. Its
+    /// remove button must target the equivalent live attachment, never that UUID.
+    private func attachmentID(for item: ContextItem) -> UUID? {
+        model.contextItems.first(where: { sameMaterial($0, item) })?.id
+    }
+
+    private func isHistorical(_ item: ContextItem) -> Bool {
+        model.currentDiscussion?.messages.contains { message in
+            message.role == .user && (message.contextItems ?? []).contains(where: { sameMaterial($0, item) })
+        } == true
+    }
+
+    private func provenance(for item: ContextItem) -> String {
+        if attachmentID(for: item) != nil { return isHistorical(item) ? "本次附加 · 之前也引用过" : "本次附加" }
+        if let anchor = model.currentDiscussion?.anchor, sameMaterial(model.contextItem(for: anchor), item) {
+            return "讨论原文 · 本讨论会持续引用"
+        }
+        return isHistorical(item) ? "历史引用 · 来自之前的提问" : "这次选中的原文"
+    }
+
+    /// Match the catalog's source/body/title identity, without treating snapshot
+    /// IDs or soft links as material identity. Anchor collections act as sets.
+    private func sameMaterial(_ lhs: ContextItem, _ rhs: ContextItem) -> Bool {
+        guard lhs.documentID == rhs.documentID, lhs.title == rhs.title, lhs.body == rhs.body else { return false }
+        func sameAnchor(_ a: SourceAnchor, _ b: SourceAnchor) -> Bool {
+            a.documentID == b.documentID && a.pageIndex == b.pageIndex && a.rects == b.rects
+                && a.selectedText == b.selectedText && a.imageRelativePath == b.imageRelativePath
+        }
+        return lhs.anchors.allSatisfy { a in rhs.anchors.contains(where: { sameAnchor(a, $0) }) }
+            && rhs.anchors.allSatisfy { b in lhs.anchors.contains(where: { sameAnchor($0, b) }) }
+    }
+
     private var selectionIncluded: Bool {
         guard let selection = model.selection else { return false }
-        return nextMaterials.contains { item in item.anchors.contains {
+        return activeMaterials.contains { item in item.anchors.contains {
             $0.documentID == model.selectedBookID && $0.pageIndex == selection.pageIndex && $0.rects == selection.rects
         } }
     }
@@ -33,7 +75,7 @@ struct ContextBasketView: View {
     private var summary: String {
         if nextMaterials.isEmpty { return "引用原文（可选）" }
         if nextMaterials.count == 1, let item = nextMaterials.first,
-           item.noteID == nil, item.discussionID == nil, let anchor = item.anchors.first {
+           item.noteID == nil, item.discussionID == nil, item.anchors.count == 1, let anchor = item.anchors.first {
             return "引用原文 · PDF \(anchor.pageIndex + 1)"
         }
         return "引用 \(nextMaterials.count) 项材料"
@@ -69,7 +111,7 @@ struct ContextBasketView: View {
                 Spacer()
                 Text("\(nextMaterials.count) 项").font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary)
             }
-            Text("下面的材料会随下一问发送。")
+            Text(hasHistory ? "会沿用这条讨论之前的对话与引用。" : "下面的材料会随下一问发送。")
                 .font(.system(size: 12)).foregroundStyle(.secondary)
             if canAttachSelection, let selection = model.selection {
                 VStack(alignment: .leading, spacing: 8) {
@@ -92,14 +134,15 @@ struct ContextBasketView: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 0) {
                         ForEach(nextMaterials) { item in
-                            if model.contextItems.contains(where: { $0.id == item.id }) {
-                                ContextMaterialRow(item: item, model: model, remove: { model.removeContextItem(id: item.id) })
+                            if let id = attachmentID(for: item) {
+                                ContextMaterialRow(item: item, model: model,
+                                    remove: { model.removeContextItem(id: id) }, provenance: provenance(for: item))
                             } else {
-                                ContextMaterialRow(item: item, model: model, remove: nil)
+                                ContextMaterialRow(item: item, model: model, remove: nil, provenance: provenance(for: item))
                             }
                         }
                     }
-                }.frame(height: min(compact ? 230 : 300, CGFloat(nextMaterials.count) * 58))
+                }.frame(height: min(compact ? 230 : 300, CGFloat(nextMaterials.count) * 76))
             }
             if model.currentDiscussion?.anchor != nil {
                 Text("这条讨论会保留最初的原文引用；新讨论可更换引用。")
@@ -143,18 +186,18 @@ struct SentContextSnapshot: View {
     var body: some View {
         if let items {
             Button { presented.toggle() } label: {
-                Label("引用 \(items.count) 项", systemImage: "paperclip")
+                Label("当次附加 \(items.count) 项", systemImage: "paperclip")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
             .popover(isPresented: $presented, arrowEdge: .leading) {
                 VStack(alignment: .leading, spacing: 11) {
                     HStack {
-                        Text("这次发送的引用").font(.system(size: 14, weight: .semibold))
+                        Text("这条问题附加的引用").font(.system(size: 14, weight: .semibold))
                         Spacer()
                         Text("\(items.count) 项").font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary)
                     }
-                    Text("以下是这条问题发送时使用的材料，之后的修改不会影响它。")
+                    Text("这里记录这条问题附加的材料；更早的对话和引用会随讨论沿用。")
                         .font(.system(size: 11.5)).lineSpacing(3).foregroundStyle(.secondary)
                     if items.isEmpty {
                         Text("这次没有附加材料，仍会延续本讨论已有的对话。")
@@ -179,6 +222,7 @@ private struct ContextMaterialRow: View {
     let item: ContextItem
     @ObservedObject var model: AppModel
     let remove: (() -> Void)?
+    var provenance: String? = nil
     @State private var presented = false
 
     private var icon: String {
@@ -205,6 +249,9 @@ private struct ContextMaterialRow: View {
                     Spacer(minLength: 0)
                     ContextSourceJump(anchors: item.anchors, model: model)
                         .font(.system(size: 10.5))
+                }
+                if let provenance {
+                    Text(provenance).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(2)
                 }
             }
             if let remove {

@@ -391,6 +391,30 @@ final class AppModel: ObservableObject {
                             surroundingText: selection.surroundingText)
     }
 
+    /// The selection toolbar is a continuation action. Clicking it again for
+    /// the same source should return to that discussion, rather than creating
+    /// another empty discussion or saving an identical image asset.
+    func discussSelection() {
+        guard !isBusy, let book = selectedBook else { return }
+        if let discussion = currentDiscussion, discussion.documentID == book.id {
+            let sameSource: Bool
+            if let selection, let anchor = discussion.anchor {
+                func normalizedQuote(_ value: String) -> String {
+                    value.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+                }
+                sameSource = anchor.documentID == book.id && anchor.pageIndex == selection.pageIndex
+                    && anchor.rects == selection.rects
+                    && normalizedQuote(anchor.selectedText ?? "") == normalizedQuote(selection.text)
+                    && (anchor.imageRelativePath != nil) == (selection.imageData != nil)
+            } else { sameSource = selection == nil }
+            if sameSource {
+                showInspector = true; rightTab = 0; focusComposerToken = UUID()
+                return
+            }
+        }
+        startDiscussion()
+    }
+
     func startDiscussion(useSelection: Bool = true) {
         guard let book = selectedBook, let store, !isBusy else { return }
         do {
