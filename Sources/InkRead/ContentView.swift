@@ -11,6 +11,7 @@ struct ContentView: View {
     @State private var referenceWidth: CGFloat = 350
     @State private var referenceHeight: CGFloat = 280
     @State private var resumePopover = false
+    @State private var selectionGeometry: ReaderSelectionGeometry?
     @FocusState private var searchFocused: Bool
 
     var body: some View {
@@ -308,17 +309,33 @@ struct ContentView: View {
     }
 
     private func mainPDF(_ book: Book, store: LibraryStore) -> some View {
-        ZStack(alignment: .bottom) {
-            PDFReaderView(url: store.pdfURL(for: book), captureRegion: model.captureRegion, jump: model.readerJump,
-                          onSelection: model.receiveSelection, onPageChanged: model.recordPage, highlights: sourceHighlights,
-                          nightReading: colorScheme == .dark && model.invertPDFInDarkMode, command: model.readerCommand,
-                          onMetrics: { model.readerMetrics = $0 }, onSearchResults: { model.pdfSearchHits = $0 }, onSearchStatus: { model.pdfSearching = $0 },
-                          onAnnotationClicked: { id in if let item = model.annotations.first(where: { $0.id == id }) { model.openAnnotationEditor(existing: item) } }).id(book.id)
-            if model.captureRegion {
-                VStack { Label("拖动框选图表或公式", systemImage: "cursorarrow.square").font(.system(size: 13)).padding(.horizontal, 13).padding(.vertical, 9)
-                        .background(.regularMaterial, in: Capsule()).padding(.top, 15); Spacer() }.allowsHitTesting(false)
-            }
-            if let selection = model.selection { selectionBar(selection).padding(12) }
+        GeometryReader { viewport in
+            ZStack(alignment: .topLeading) {
+                PDFReaderView(url: store.pdfURL(for: book), captureRegion: model.captureRegion, jump: model.readerJump,
+                              onSelection: model.receiveSelection, onPageChanged: model.recordPage, highlights: sourceHighlights,
+                              nightReading: colorScheme == .dark && model.invertPDFInDarkMode, command: model.readerCommand,
+                              onMetrics: { model.readerMetrics = $0 }, onSearchResults: { model.pdfSearchHits = $0 }, onSearchStatus: { model.pdfSearching = $0 },
+                              onAnnotationClicked: { id in if let item = model.annotations.first(where: { $0.id == id }) { model.openAnnotationEditor(existing: item) } },
+                              activeSelection: model.selection, onSelectionGeometry: { selectionGeometry = $0 },
+                              onSelectionCleared: { model.selection = nil }).id(book.id)
+                if model.captureRegion {
+                    VStack { Label("拖动框选图表或公式", systemImage: "cursorarrow.square").font(.system(size: 13)).padding(.horizontal, 13).padding(.vertical, 9)
+                            .background(.regularMaterial, in: Capsule()).padding(.top, 15); Spacer() }.allowsHitTesting(false)
+                }
+                if let selection = model.selection, let placement = selectionGeometry,
+                   placement.pageIndex == selection.pageIndex, placement.rects == selection.rects,
+                   !model.captureRegion {
+                    let width = min(350, max(0, viewport.size.width - 16))
+                    let height: CGFloat = 44
+                    let rect = placement.bounds
+                    let x = min(max(rect.midX, width / 2 + 8), viewport.size.width - width / 2 - 8)
+                    let below = rect.maxY + 8
+                    let y = below + height <= viewport.size.height - 8 ? below : max(8, rect.minY - height - 8)
+                    selectionBar(selection)
+                        .frame(width: width, height: height)
+                        .offset(x: x - width / 2, y: min(y, max(8, viewport.size.height - height - 8)))
+                }
+            }.onChange(of: book.id) { _, _ in selectionGeometry = nil }
         }
     }
 
@@ -395,47 +412,54 @@ struct ContentView: View {
     }
 
     private func selectionBar(_ selection: ReaderSelection) -> some View {
-        VStack(alignment: .leading, spacing: 9) {
-            HStack(spacing: 8) {
-                Image(systemName: selection.imageData == nil ? "text.quote" : "viewfinder").foregroundStyle(Color.accent)
-                Text("\(selection.imageData == nil ? "原文" : "图表") · PDF \(selection.pageIndex + 1)").font(.system(size: 11, weight: .medium, design: .monospaced)).foregroundStyle(.secondary)
-                Text(selection.text.replacingOccurrences(of: "\n", with: " ")).font(.system(size: 12)).lineLimit(1)
-                Spacer(minLength: 2)
-                WorkbenchIcon("清除选区", symbol: "xmark") { model.clearReaderSelection() }
+        ViewThatFits(in: .horizontal) {
+            selectionActions(selection, compact: false)
+            selectionActions(selection, compact: true)
+        }.padding(.horizontal, 9).frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 9))
+            .overlay { RoundedRectangle(cornerRadius: 9).strokeBorder(Color.secondary.opacity(0.22), lineWidth: 0.5) }
+            .shadow(color: .black.opacity(0.16), radius: 8, y: 3)
+            .accessibilityElement(children: .contain).accessibilityLabel("选区工具")
+    }
+
+    private func selectionActions(_ selection: ReaderSelection, compact: Bool) -> some View {
+        HStack(spacing: compact ? 5 : 8) {
+            Button(action: model.discussSelection) { selectionActionLabel("提问", symbol: "bubble.left", compact: compact) }
+                .buttonStyle(.borderedProminent).foregroundStyle(Color.onAccent).controlSize(.small).disabled(model.isBusy)
+                .accessibilityLabel("提问").help("引用这段原文并开始提问  ⇧⌘D")
+            if selection.imageData == nil {
+                Button(action: model.translateSelection) { selectionActionLabel("翻译", symbol: "character.bubble", compact: compact) }
+                    .buttonStyle(.bordered).controlSize(.small).accessibilityLabel("翻译")
+                    .disabled(!model.canTranslateSelection).help("结合当前页语境翻译选中的英文  ⇧⌘T")
             }
-            HStack(spacing: 7) {
-                Button(action: model.discussSelection) { Text("提问").font(.system(size: 12, weight: .medium)) }
-                    .buttonStyle(.borderedProminent).foregroundStyle(Color.onAccent).controlSize(.small).disabled(model.isBusy)
-                    .help("引用这段原文并开始提问")
-                if selection.imageData == nil {
-                    Button("翻译", action: model.translateSelection)
-                        .font(.system(size: 12, weight: .medium)).buttonStyle(.bordered).controlSize(.small)
-                        .disabled(!model.canTranslateSelection).help("结合当前页语境翻译选中的英文  ⇧⌘T")
-                }
-                Button("记笔记") { model.openNoteEditor() }
-                    .font(.system(size: 12)).buttonStyle(.bordered).controlSize(.small)
-                Menu {
-                    ForEach(AnnotationColor.allCases, id: \.self) { color in
-                        Button { model.quickAnnotate(color) } label: {
-                            Label(color.title + (selection.imageData == nil ? "高亮" : "方框"), systemImage: "circle.fill")
-                                .foregroundStyle(Color(annotationColor: color))
-                        }
+            Button { model.openNoteEditor() } label: { selectionActionLabel("记笔记", symbol: "square.and.pencil", compact: compact) }
+                .buttonStyle(.bordered).controlSize(.small).accessibilityLabel("记笔记").help("为选中的内容写笔记")
+            Menu {
+                ForEach(AnnotationColor.allCases, id: \.self) { color in
+                    Button { model.quickAnnotate(color) } label: {
+                        Label(color.title + (selection.imageData == nil ? "高亮" : "方框"), systemImage: "circle.fill")
+                            .foregroundStyle(Color(annotationColor: color))
                     }
-                    Divider()
-                    Button("批注与备注…") { model.openAnnotationEditor() }
-                } label: { Text("标记").font(.system(size: 12)) }
-                    .menuStyle(.borderlessButton).fixedSize().help("添加颜色或文字批注")
-                Spacer(minLength: 0)
-                Menu {
-                    Button("添加到引用材料", action: model.addSelectionToContext)
-                    Button("记为待解答的问题…") { model.openQuestionEditor() }
-                    Button("收录到术语手册…") { model.openTermEditor() }
-                    Button("固定为参考页") { model.pinSelection() }
-                } label: { Image(systemName: "ellipsis.circle").font(.system(size: 14)) }.menuStyle(.borderlessButton).fixedSize().help("选区操作")
-            }
-        }.padding(10).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 9))
-            .overlay { RoundedRectangle(cornerRadius: 9).strokeBorder(Color.secondary.opacity(0.18), lineWidth: 0.5) }
-            .shadow(color: .black.opacity(0.10), radius: 12, y: 4)
+                }
+                Divider()
+                Button("批注与备注…") { model.openAnnotationEditor() }
+            } label: { selectionActionLabel("标记", symbol: "highlighter", compact: compact) }
+                .menuStyle(.borderlessButton).fixedSize().accessibilityLabel("标记").help("添加颜色或文字批注")
+            Menu {
+                Button("添加到引用材料", action: model.addSelectionToContext)
+                Button("记为待解答的问题…") { model.openQuestionEditor() }
+                Button("收录到术语手册…") { model.openTermEditor() }
+                Button("固定为参考页") { model.pinSelection() }
+            } label: { Image(systemName: "ellipsis").font(.system(size: 14)).frame(width: 16) }
+                .menuStyle(.borderlessButton).fixedSize().accessibilityLabel("更多选区操作").help("更多选区操作")
+            WorkbenchIcon("清除选区", symbol: "xmark") { model.clearReaderSelection() }
+        }
+        .fixedSize().font(.system(size: 13, weight: .medium))
+    }
+
+    @ViewBuilder private func selectionActionLabel(_ title: String, symbol: String, compact: Bool) -> some View {
+        if compact { Image(systemName: symbol).frame(width: 16) }
+        else { Text(title) }
     }
 
     private var sourceHighlights: [ReaderHighlight] {

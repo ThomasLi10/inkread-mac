@@ -12,6 +12,14 @@ struct ReaderSelection {
     var surroundingText: String
 }
 
+/// Viewport points with a top-left origin, for the SwiftUI selection tools only.
+/// PDFKit remains responsible for all page, rotation and zoom transforms.
+struct ReaderSelectionGeometry: Equatable {
+    var bounds: CGRect
+    var pageIndex: Int
+    var rects: [PageRect]
+}
+
 struct ReaderJump: Equatable {
     var token: UUID = UUID()
     var pageIndex: Int
@@ -41,6 +49,9 @@ struct PDFReaderView: NSViewRepresentable {
     var onSearchResults: ([ReaderSearchHit]) -> Void = { _ in }
     var onSearchStatus: (Bool) -> Void = { _ in }
     var onAnnotationClicked: (UUID) -> Void = { _ in }
+    var activeSelection: ReaderSelection? = nil
+    var onSelectionGeometry: (ReaderSelectionGeometry?) -> Void = { _ in }
+    var onSelectionCleared: () -> Void = {}
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -81,11 +92,17 @@ struct PDFReaderView: NSViewRepresentable {
         view.setNightReading(nightReading)
         view.capturesRegion = captureRegion
         view.onRegionCaptured = { [weak coordinator] selection in
+            coordinator?.selectionTask?.cancel()
+            coordinator?.lastSelectionSignature = nil
             coordinator?.parent.onSelection(selection)
         }
         view.onAnnotationClicked = { [weak coordinator] id in
             coordinator?.parent.onAnnotationClicked(id)
         }
+        view.onSelectionGeometry = { [weak coordinator] geometry in
+            coordinator?.parent.onSelectionGeometry(geometry)
+        }
+        view.toolSelection = activeSelection
         if coordinator.lastHighlights != highlights {
             view.setManagedHighlights(highlights)
             coordinator.lastHighlights = highlights
@@ -106,6 +123,8 @@ struct PDFReaderView: NSViewRepresentable {
         nsView.onRegionCaptured = nil
         nsView.onViewportChanged = nil
         nsView.onAnnotationClicked = nil
+        nsView.onSelectionFinished = nil
+        nsView.onSelectionGeometry = nil
         nsView.stopInteractionMonitoring()
     }
 
@@ -140,6 +159,15 @@ struct PDFReaderView: NSViewRepresentable {
         func connect(_ view: SelectionPDFView) {
             reader = view
             view.onViewportChanged = { [weak self] in self?.viewportChanged() }
+            view.onSelectionFinished = { [weak self] in
+                guard let self, !self.readerIsProgrammaticallySelected else { return }
+                if self.reader?.currentSelection?.string?.isEmpty != false {
+                    self.lastSelectionSignature = nil
+                    self.parent.onSelectionCleared()
+                } else {
+                    self.selectionChanged(Notification(name: .PDFViewSelectionChanged))
+                }
+            }
             let center = NotificationCenter.default
             center.addObserver(self, selector: #selector(selectionChanged(_:)),
                                name: .PDFViewSelectionChanged, object: view)
@@ -160,6 +188,7 @@ struct PDFReaderView: NSViewRepresentable {
             searchHighlightTask?.cancel()
             refitTask?.cancel()
             reader?.onViewportChanged = nil
+            reader?.onSelectionFinished = nil
             NotificationCenter.default.removeObserver(self)
             reader = nil
         }
@@ -179,6 +208,7 @@ struct PDFReaderView: NSViewRepresentable {
                 catch { return }
                 guard let self, !self.suppressesSelection,
                       let reader = self.reader, !reader.capturesRegion,
+                      NSEvent.pressedMouseButtons & 1 == 0,
                       let selected = reader.currentSelection,
                       selected !== self.programmaticSelection,
                       let page = selected.pages.first,
@@ -202,6 +232,7 @@ struct PDFReaderView: NSViewRepresentable {
                     .filter { !$0.isEmpty && !$0.isNull }.map(PageRect.init)
                 guard !rects.isEmpty else { return }
                 let signature = "\(index)|\(text)|\(rects)"
+                reader.revealSelectionTools()
                 guard signature != self.lastSelectionSignature else { return }
                 self.lastSelectionSignature = signature
                 self.parent.onSelection(ReaderSelection(
@@ -209,6 +240,10 @@ struct PDFReaderView: NSViewRepresentable {
                     text: text, rects: rects, imageData: nil,
                     surroundingText: SelectionPDFView.contextText(on: page, selection: local)))
             }
+        }
+
+        private var readerIsProgrammaticallySelected: Bool {
+            suppressesSelection || (programmaticSelection != nil && reader?.currentSelection === programmaticSelection)
         }
 
         @objc private func pageChanged(_ notification: Notification) {
@@ -552,6 +587,17 @@ final class SelectionPDFView: PDFView {
     }
     var onRegionCaptured: ((ReaderSelection) -> Void)?
     var onViewportChanged: (() -> Void)?
+    var onSelectionFinished: (() -> Void)?
+    var onSelectionGeometry: ((ReaderSelectionGeometry?) -> Void)?
+    var toolSelection: ReaderSelection? {
+        didSet {
+            if toolSelection?.pageIndex != oldValue?.pageIndex || toolSelection?.rects != oldValue?.rects
+                || toolSelection?.text != oldValue?.text || (toolSelection?.imageData != nil) != (oldValue?.imageData != nil) {
+                toolsDismissed = false
+            }
+            scheduleSelectionGeometry()
+        }
+    }
     var onAnnotationClicked: ((UUID) -> Void)? {
         didSet { updateInteractionMonitoring() }
     }
@@ -567,6 +613,10 @@ final class SelectionPDFView: PDFView {
     private var modifierClickMarker: UUID?
     private var modifierClickStart: NSPoint?
     private var nightReadingEnabled = false
+    private var selectingWithMouse = false
+    private var toolsDismissed = false
+    private var geometryTask: Task<Void, Never>?
+    private var lastToolGeometry: ReaderSelectionGeometry?
     private lazy var overlay: ReaderOverlayView = {
         let view = ReaderOverlayView()
         view.reader = self
@@ -579,6 +629,7 @@ final class SelectionPDFView: PDFView {
         if subviews.last !== overlay { addSubview(overlay, positioned: .above, relativeTo: nil) }
         overlay.frame = bounds
         overlay.needsDisplay = true
+        scheduleSelectionGeometry()
         onViewportChanged?()
     }
 
@@ -607,6 +658,7 @@ final class SelectionPDFView: PDFView {
             matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp, .rightMouseDown]
         ) { [weak self] event in
             guard let self else { return event }
+            self.observeSelectionEvent(event)
             return self.handleMarkerEvent(event)
         }
     }
@@ -616,6 +668,64 @@ final class SelectionPDFView: PDFView {
         interactionMonitor = nil
         modifierClickMarker = nil
         modifierClickStart = nil
+        geometryTask?.cancel()
+        selectingWithMouse = false
+    }
+
+    /// Observe PDFKit's internal text view as well as our region view. A SwiftUI
+    /// tool button overlays this view but is not its descendant: leave it alone.
+    private func observeSelectionEvent(_ event: NSEvent) {
+        guard event.window === window else { return }
+        if event.type == .leftMouseDown, let content = window?.contentView {
+            let point = content.superview?.convert(event.locationInWindow, from: nil) ?? event.locationInWindow
+            if let target = content.hitTest(point), target === self || target.isDescendant(of: self) {
+                selectingWithMouse = true
+                toolsDismissed = true
+                scheduleSelectionGeometry()
+            }
+        } else if event.type == .leftMouseUp, selectingWithMouse {
+            // PDFKit handles the actual event after this observer. Read its final
+            // selection on the next run loop, even if the pointer left the page.
+            selectingWithMouse = false
+            guard !capturesRegion else { return }
+            Task { @MainActor [weak self] in
+                await Task.yield()
+                guard let self, !self.capturesRegion else { return }
+                self.onSelectionFinished?()
+            }
+        }
+    }
+
+    func revealSelectionTools() {
+        toolsDismissed = false
+        scheduleSelectionGeometry()
+    }
+
+    private func scheduleSelectionGeometry() {
+        geometryTask?.cancel()
+        geometryTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard !Task.isCancelled, let self else { return }
+            let geometry = self.selectionGeometry()
+            guard geometry != self.lastToolGeometry else { return }
+            self.lastToolGeometry = geometry
+            self.onSelectionGeometry?(geometry)
+        }
+    }
+
+    private func selectionGeometry() -> ReaderSelectionGeometry? {
+        guard !selectingWithMouse, !toolsDismissed, !capturesRegion,
+              let toolSelection, let page = document?.page(at: toolSelection.pageIndex) else { return nil }
+        // Use each selected line separately. A union intersecting the viewport
+        // can otherwise be nonempty even when none of the real lines is visible.
+        let viewport = visibleRect.intersection(bounds).insetBy(dx: 5, dy: 5)
+        let visible = toolSelection.rects.map { convert($0.cgRect, from: page).standardized.intersection(viewport) }
+            .filter { !$0.isNull && $0.width > 1 && $0.height > 1 }
+        guard let first = visible.first else { return nil }
+        let rect = visible.dropFirst().reduce(first) { $0.union($1) }
+        let top = isFlipped ? rect.minY - bounds.minY : bounds.maxY - rect.maxY
+        return ReaderSelectionGeometry(bounds: CGRect(x: rect.minX - bounds.minX, y: top,
+            width: rect.width, height: rect.height), pageIndex: toolSelection.pageIndex, rects: toolSelection.rects)
     }
 
     /// Native PDF page coordinates drive hit testing at any zoom/rotation.
@@ -747,6 +857,7 @@ final class SelectionPDFView: PDFView {
             text: (selection?.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
             rects: [PageRect(region)], imageData: data,
             surroundingText: Self.contextText(on: dragPage, selection: selection)))
+        revealSelectionTools()
     }
 
     override func keyDown(with event: NSEvent) {
@@ -761,7 +872,10 @@ final class SelectionPDFView: PDFView {
         refreshOverlay()
     }
 
-    func refreshOverlay() { overlay.needsDisplay = true }
+    func refreshOverlay() {
+        overlay.needsDisplay = true
+        scheduleSelectionGeometry()
+    }
 
     func flash(page: PDFPage, rectangles: [NSRect]) {
         flashTask?.cancel()
