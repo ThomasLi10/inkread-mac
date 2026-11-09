@@ -11,7 +11,7 @@ struct ResearchInspector: View {
     @State private var expandedNoteIDs = Set<UUID>()
     @State private var unsavedExpanded = true
     @State private var followsLatest = true
-    @State private var lastScrollOffset: CGFloat = 0
+    @State private var scrollTracking = InspectorScrollTracker()
     @State private var composerWidth: CGFloat = 320
     @State private var availableHeight: CGFloat = 800
     @FocusState private var promptFocused: Bool
@@ -55,8 +55,6 @@ struct ResearchInspector: View {
         }
         .onChange(of: model.selectedBookID) { _, _ in
             historyQuery = ""
-            followsLatest = true
-            lastScrollOffset = 0
         }
     }
 
@@ -229,7 +227,10 @@ struct ResearchInspector: View {
     private var conversation: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 22) {
+                // Markdown tables and expanding replies need stable, actual row
+                // heights. Lazy estimates can oscillate while the bottom marker
+                // is measured or scrolled into view on macOS.
+                VStack(alignment: .leading, spacing: 22) {
                     if let discussion = model.currentDiscussion, !discussion.messages.isEmpty {
                         ForEach(discussion.messages) { message in messageRow(message) }
                     } else {
@@ -264,23 +265,18 @@ struct ResearchInspector: View {
             .background(GeometryReader { geometry in
                 Color.clear.preference(key: InspectorScrollPreference.self, value: InspectorScrollMetrics(viewportHeight: geometry.size.height))
             })
-            .onPreferenceChange(InspectorScrollPreference.self) { metrics in
-                guard let bottom = metrics.bottom, let content = metrics.contentHeight, let viewport = metrics.viewportHeight else { return }
-                let offset = content - bottom
-                // Content growth changes content and bottom equally. Only a
-                // decreasing offset means the reader deliberately scrolled up.
-                if offset < lastScrollOffset - 2, bottom > viewport + 60 { followsLatest = false }
-                if bottom <= viewport + 45 { followsLatest = true }
-                lastScrollOffset = offset
-            }
+            .onPreferenceChange(InspectorScrollPreference.self, perform: trackScroll)
             .onChange(of: model.streamingText) { _, _ in scrollToLatest(proxy, force: false) }
             .onChange(of: model.currentDiscussion?.messages.count ?? 0) { _, _ in scrollToLatest(proxy, force: false) }
-            .onAppear { scrollToLatest(proxy, force: true) }
-            .onChange(of: model.selectedDiscussionID) { _, _ in
-                followsLatest = true
-                lastScrollOffset = 0
+            .onAppear {
+                resetScrollTracking()
                 scrollToLatest(proxy, force: true)
             }
+            .onChange(of: scrollContextID) { _, _ in
+                resetScrollTracking()
+                scrollToLatest(proxy, force: true)
+            }
+            .onDisappear { scrollTracking.reset() }
             .overlay(alignment: .bottom) {
                 if !followsLatest {
                     Button {
@@ -297,13 +293,77 @@ struct ResearchInspector: View {
         }
     }
 
+    private var scrollContextID: String {
+        (model.selectedBookID?.uuidString ?? "none") + "/" + (model.selectedDiscussionID?.uuidString ?? "new")
+    }
+
+    private func resetScrollTracking() {
+        scrollTracking.reset()
+        if !followsLatest { followsLatest = true }
+    }
+
+    private func trackScroll(_ metrics: InspectorScrollMetrics) {
+        guard let bottom = metrics.bottom, let content = metrics.contentHeight,
+              let viewport = metrics.viewportHeight,
+              bottom.isFinite, content.isFinite, viewport.isFinite, content >= 0, viewport > 0 else { return }
+        // Pixel-scale jitter must not schedule another SwiftUI transaction. The
+        // tracking object itself has no publisher; only a real follow-mode change
+        // writes @State below.
+        let rounded = InspectorScrollMetrics(bottom: bottom.rounded(), contentHeight: content.rounded(),
+                                            viewportHeight: viewport.rounded())
+        guard rounded != scrollTracking.lastMetrics else { return }
+        let offset = content.rounded() - bottom.rounded()
+        guard offset.isFinite else { return }
+        if let previous = scrollTracking.lastOffset {
+            let away = previous - offset
+            if away > 0 { scrollTracking.awayTravel = min(4, scrollTracking.awayTravel + away) }
+            else if away < 0 { scrollTracking.awayTravel = 0 }
+        }
+        scrollTracking.lastMetrics = rounded
+        scrollTracking.lastOffset = offset
+        var nextFollowsLatest = followsLatest
+        // Content growth moves content and bottom together. Moving away from
+        // the end decreases this offset; accumulate slow trackpad movement too.
+        if scrollTracking.awayTravel >= 3, bottom > viewport + 60 {
+            nextFollowsLatest = false
+            if followsLatest || scrollTracking.pendingScroll != nil { scrollTracking.cancelPendingScroll() }
+        }
+        if bottom <= viewport + 45 {
+            nextFollowsLatest = true
+            scrollTracking.awayTravel = 0
+        }
+        if nextFollowsLatest != followsLatest { followsLatest = nextFollowsLatest }
+    }
+
     private func scrollToLatest(_ proxy: ScrollViewProxy, force: Bool) {
         guard force || followsLatest else { return }
-        DispatchQueue.main.async {
-            guard force || followsLatest else { return }
+        let tracker = scrollTracking
+        if force { tracker.awayTravel = 0 }
+        tracker.pendingForce = tracker.pendingForce || force
+        guard tracker.pendingScroll == nil else { return }
+        let generation = tracker.generation
+        let bookID = model.selectedBookID
+        let discussionID = model.selectedDiscussionID
+        let following = $followsLatest
+        let target = bottomID
+        let model = model
+        // Streaming may deliver many deltas in one frame. Keep one bounded
+        // request instead of queuing a scroll block for every delta.
+        tracker.pendingScroll = Task { @MainActor [weak tracker, weak model] in
+            if force { await Task.yield() }
+            else {
+                do { try await Task.sleep(nanoseconds: 80_000_000) }
+                catch { return }
+            }
+            guard !Task.isCancelled, let tracker, let model, tracker.generation == generation else { return }
+            let shouldForce = tracker.pendingForce
+            tracker.pendingScroll = nil
+            tracker.pendingForce = false
+            guard model.selectedBookID == bookID, model.selectedDiscussionID == discussionID,
+                  shouldForce || following.wrappedValue else { return }
             var transaction = Transaction()
             transaction.disablesAnimations = true
-            withTransaction(transaction) { proxy.scrollTo(bottomID, anchor: .bottom) }
+            withTransaction(transaction) { proxy.scrollTo(target, anchor: .bottom) }
         }
     }
 
@@ -417,7 +477,7 @@ struct ResearchInspector: View {
                         .font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(2).help(model.activity)
                     Spacer(minLength: 0)
                     if let startedAt = model.responseStartedAt {
-                        TimelineView(.periodic(from: Date(), by: 1)) { timeline in
+                        TimelineView(.periodic(from: startedAt, by: 1)) { timeline in
                             Text(elapsed(since: startedAt, now: timeline.date))
                                 .font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary)
                         }
@@ -598,6 +658,33 @@ struct ResearchInspector: View {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
     }
+}
+
+/// Main-thread bookkeeping with no ObservableObject/@Published members. Updating
+/// a measured coordinate must never invalidate the view measuring it.
+private final class InspectorScrollTracker {
+    var lastMetrics: InspectorScrollMetrics?
+    var lastOffset: CGFloat?
+    var awayTravel: CGFloat = 0
+    var generation = UUID()
+    var pendingForce = false
+    var pendingScroll: Task<Void, Never>?
+
+    func cancelPendingScroll() {
+        pendingScroll?.cancel()
+        pendingScroll = nil
+        pendingForce = false
+        generation = UUID()
+    }
+
+    func reset() {
+        cancelPendingScroll()
+        lastMetrics = nil
+        lastOffset = nil
+        awayTravel = 0
+    }
+
+    deinit { pendingScroll?.cancel() }
 }
 
 private struct InspectorScrollMetrics: Equatable {
